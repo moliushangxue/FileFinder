@@ -5,14 +5,6 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [未发布]
-
-### 计划添加
-- 支持递归搜索子文件夹
-- 添加文件预览功能
-- 支持正则表达式搜索
-- 添加撤销功能
-
 ## [1.0.0] - 2026-05-02
 
 ### 新增
