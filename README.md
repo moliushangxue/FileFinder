@@ -1,5 +1,6 @@
 # FileFinder
-#作者：b站：墨流觞雪  github：moliushangxue
+
+> 作者：[GitHub：moliushangxue](https://github.com/moliushangxue)
 
 一个简单易用的批量文件筛选和操作工具，支持按文件名关键词搜索、按文件类型筛选，并提供复制/剪切/移动功能。
 
