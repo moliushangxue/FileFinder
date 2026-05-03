@@ -48,7 +48,11 @@
 
 5. **使用即表示理解并同意以上全部内容**。如不同意上述条款，请勿使用本工具。
 
+6. **因使用本工具所引发的任何直接或间接的损害，包括但不限于文件丢失、数据损坏、系统故障或其他任何形式的损失，本人概不承担任何责任。**
+
 > "本人不对任何因使用或无法使用本工具而产生的损失负责，包括但不限于直接损失、间接损失、偶然损失或特殊损失，即使已被告知发生此类损失的可能性。"
+>
+> **English:** *"In no event shall the author be liable for any damages (including, without limitation, lost data, file corruption, or any other damages) arising out of the use or inability to use this tool."*
 
 
 ## 快速开始
