@@ -590,7 +590,7 @@ class FileManagerApp(PreviewMixin, ClipboardMixin):
     # ════════════════════════════════════════════════════════════
 
     def perform_action(self, action):
-        """执行文件操作（复制/剪切/直接移动）
+        """执行文件操作（复制/剪切）
 
         整体流程：
         1. 验证输入（目标文件夹、选中的文件）
