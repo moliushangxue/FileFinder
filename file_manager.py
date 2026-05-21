@@ -1,209 +1,217 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-文件管理工具 - 批量文件筛选和操作工具
-支持按文件名关键词搜索、按文件类型筛选，并提供复制/剪切/移动功能
+FileFinder 主程序 - 批量文件筛选和操作工具
+
+功能概览：
+  1. 选择源文件夹，扫描里面的文件
+  2. 按关键词（文件名）和扩展名（文件类型）筛选文件
+  3. 支持递归搜索子文件夹
+  4. 预览文件内容（文本/Office/图片等）
+  5. 把选中的文件复制、剪切或移动到目标文件夹
+  6. 处理同名文件冲突（覆盖/重命名/跳过）
+
+架构说明：
+  - FileManagerApp 是主类，继承自 PreviewMixin + ClipboardMixin
+  - PreviewMixin（preview_mixin.py）：文件预览功能
+  - ClipboardMixin（clipboard_mixin.py）：剪贴板操作功能
+  - ConflictDialog（conflict_dialog.py）：冲突处理弹窗
+  - constants.py：全局常量和工具函数
+
 v2.0 - 新增：递归搜索子文件夹、文件预览、文件冲突处理
 """
 
 import os
-import shutil
+import shutil                                     # 文件操作（复制、移动）
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext
-from pathlib import Path
-import platform
-import datetime
+import threading                                  # 多线程，让扫描不卡 UI
+import traceback                                  # 获取完整的错误堆栈信息
+from collections import defaultdict               # 带默认值的字典
 
 
-# ─── 文本文件预览的最大字节数 ───
-PREVIEW_MAX_BYTES = 100 * 1024  # 100 KB
-# ─── 可预览的文本扩展名 ───
-TEXT_PREVIEW_EXTS = {
-    '.txt', '.py', '.js', '.ts', '.jsx', '.tsx', '.html', '.htm', '.css',
-    '.json', '.xml', '.yaml', '.yml', '.toml', '.ini', '.cfg', '.conf',
-    '.md', '.rst', '.csv', '.tsv', '.log', '.sh', '.bash', '.zsh', '.bat',
-    '.cmd', '.ps1', '.c', '.cpp', '.h', '.hpp', '.java', '.kt', '.go',
-    '.rs', '.rb', '.php', '.sql', '.r', '.m', '.swift', '.dart', '.lua',
-    '.pl', '.pm', '.hs', '.ex', '.exs', '.erl', '.clj', '.lisp', '.el',
-    '.vim', '.env', '.gitignore', '.dockerignore', '.makefile', '.cmake',
-}
+class ToolTip:
+    """鼠标悬浮提示：鼠标放在控件上时，弹出一段解释文字
 
+    tkinter 没有自带的 Tooltip，所以手写一个简单的。
+    原理：监听鼠标进入/离开事件，进入时创建一个小窗口显示文字，离开时销毁。
+    """
 
-class ConflictDialog(tk.Toplevel):
-    """文件冲突处理对话框"""
-
-    def __init__(self, parent, conflicts):
+    def __init__(self, widget, text):
+        """参数:
+            widget: 要绑定提示的控件（如按钮、复选框等）
+            text:   提示文字
         """
-        conflicts: list of (filename, src_path, dest_path, conflict_type)
-        """
-        super().__init__(parent)
-        self.title("文件冲突")
-        self.geometry("620x450")
-        self.resizable(False, False)
-        self.transient(parent)
-        self.grab_set()
+        self.widget = widget
+        self.text = text
+        self.tip_window = None   # 提示窗口对象（None 表示当前没显示）
 
-        self.conflicts = conflicts
-        self.result = {}  # {filename: "skip" | "overwrite" | "rename"}
-        self._apply_all = None
+        # 绑定鼠标事件
+        widget.bind('<Enter>', self._show)    # 鼠标进入控件 → 显示提示
+        widget.bind('<Leave>', self._hide)    # 鼠标离开控件 → 隐藏提示
 
-        self._build_ui()
-        self.protocol("WM_DELETE_WINDOW", self._on_cancel)
+    def _show(self, event=None):
+        """显示提示窗口"""
+        if self.tip_window:
+            return  # 已经在显示了，不用重复创建
 
-        # 居中
-        self.update_idletasks()
-        x = parent.winfo_x() + (parent.winfo_width() - self.winfo_width()) // 2
-        y = parent.winfo_y() + (parent.winfo_height() - self.winfo_height()) // 2
-        self.geometry(f"+{x}+{y}")
+        # 计算提示窗口的位置：在控件下方偏右一点
+        x = self.widget.winfo_rootx() + 20   # 控件左边缘 + 20像素
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 5  # 控件底部 + 5像素
 
-    def _build_ui(self):
-        # 统计冲突类型
-        target_conflicts = sum(1 for _, _, _, ct in self.conflicts if "目标" in ct)
-        source_conflicts = sum(1 for _, _, _, ct in self.conflicts if "源文件" in ct)
-        
-        summary_parts = []
-        if target_conflicts:
-            summary_parts.append(f"{target_conflicts} 个与目标文件夹冲突")
-        if source_conflicts:
-            summary_parts.append(f"{source_conflicts} 个源文件之间同名冲突")
-        
-        ttk.Label(
-            self, text=f"发现文件冲突（{'，'.join(summary_parts)}），请选择处理方式：",
-            padding=10, wraplength=580
-        ).pack(fill=tk.X)
+        # 创建一个无边框的顶层小窗口
+        self.tip_window = tw = tk.Toplevel(self.widget)
+        tw.wm_overrideredirect(True)          # 去掉窗口边框和标题栏
+        tw.wm_geometry(f"+{x}+{y}")           # 设置位置
+        tw.attributes('-topmost', True)        # 始终在最前面
 
-        # 冲突文件列表
-        list_frame = ttk.Frame(self, padding=(10, 0))
-        list_frame.pack(fill=tk.BOTH, expand=True)
+        # 在小窗口里放一个 Label 显示文字
+        label = tk.Label(
+            tw, text=self.text,
+            justify=tk.LEFT,                   # 文字左对齐
+            background="#ffffe0",              # 淡黄色背景（经典提示框颜色）
+            relief=tk.SOLID,                   # 实线边框
+            borderwidth=1,
+            font=("Microsoft YaHei", 9),       # 微软雅黑 9号字
+            padx=8, pady=4                     # 文字周围留 8x4 像素空白
+        )
+        label.pack()
 
-        scrollbar = ttk.Scrollbar(list_frame)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+    def _hide(self, event=None):
+        """隐藏提示窗口"""
+        if self.tip_window:
+            self.tip_window.destroy()  # 销毁窗口
+            self.tip_window = None
 
-        self.listbox = tk.Listbox(list_frame, height=10, yscrollcommand=scrollbar.set)
-        self.listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scrollbar.config(command=self.listbox.yview)
-
-        for fname, src, dest, conflict_type in self.conflicts:
-            src_size = os.path.getsize(src) if os.path.exists(src) else 0
-            # 显示冲突类型 + 大小信息
-            if "源文件" in conflict_type:
-                self.listbox.insert(
-                    tk.END,
-                    f"⚠ {fname}  — {conflict_type}（大小: {self._fmt_size(src_size)}）"
-                )
-            else:
-                dest_size = os.path.getsize(dest) if os.path.exists(dest) else 0
-                self.listbox.insert(
-                    tk.END,
-                    f"⚠ {fname}  — {conflict_type}（源: {self._fmt_size(src_size)} → 目标: {self._fmt_size(dest_size)}）"
-                )
-
-        # 按钮区域
-        btn_frame = ttk.Frame(self, padding=10)
-        btn_frame.pack(fill=tk.X)
-
-        ttk.Button(btn_frame, text="全部覆盖", command=lambda: self._apply_all_action("overwrite")).pack(side=tk.LEFT, padx=4)
-        ttk.Button(btn_frame, text="全部重命名", command=lambda: self._apply_all_action("rename")).pack(side=tk.LEFT, padx=4)
-        ttk.Button(btn_frame, text="全部跳过", command=lambda: self._apply_all_action("skip")).pack(side=tk.LEFT, padx=4)
-        ttk.Button(btn_frame, text="取消", command=self._on_cancel).pack(side=tk.RIGHT, padx=4)
-
-    @staticmethod
-    def _fmt_size(size):
-        for unit in ('B', 'KB', 'MB', 'GB'):
-            if size < 1024:
-                return f"{size:.1f} {unit}"
-            size /= 1024
-        return f"{size:.1f} TB"
-
-    def _apply_all_action(self, action):
-        self._apply_all = action
-        for fname, _, _, _ in self.conflicts:
-            self.result[fname] = action
-        self.destroy()
-
-    def _on_cancel(self):
-        self.result = None  # 用户取消
-        self.destroy()
+# 导入项目的其他模块
+from constants import COMMON_TYPES, compile_regex_patterns, match_file  # 常用文件类型集合、正则工具、文件匹配函数
+from conflict_dialog import ConflictDialog        # 冲突处理对话框
+from preview_mixin import PreviewMixin            # 文件预览功能
+from clipboard_mixin import ClipboardMixin        # 剪贴板功能
 
 
-class FileManagerApp:
+class FileManagerApp(PreviewMixin, ClipboardMixin):
+    """主应用类
+
+    多继承说明：
+    class FileManagerApp(PreviewMixin, ClipboardMixin):
+    表示 FileManagerApp 同时拥有 PreviewMixin 和 ClipboardMixin 的所有方法。
+    这是 Python 的"混入"（Mixin）模式，用来把不同功能分散到不同文件中。
+    """
+
     def __init__(self, root):
+        """初始化主应用
+
+        参数:
+            root: tkinter.Tk() 根窗口对象
+        """
         self.root = root
-        self.root.title("FileFinder v2.0")
+        self.root.title("FileFinder v2.1")
         self.root.geometry("1100x750")
 
-        # 变量初始化
-        self.folder_path = tk.StringVar()
-        self.target_folder = tk.StringVar()
-        self.file_extensions = []  # 选中的文件扩展名
-        self.all_extensions = set()  # 所有检测到的扩展名
-        self.found_files = []  # 找到的文件列表
-        self.selected_files = []  # 用户选中的文件
-        self.recursive_var = tk.BooleanVar(value=False)  # 递归搜索
+        # ── 界面变量 ──
+        # StringVar 是 tkinter 的"可追踪变量"，和界面控件绑定后，
+        #修改变量值会自动更新界面，反之亦然。
+        self.folder_path = tk.StringVar()              # 源文件夹路径
+        self.target_folder = tk.StringVar()            # 目标文件夹路径
+        self.file_extensions = []                       # 用户选中的扩展名列表
+        self.all_extensions = set()                     # 扫描到的所有扩展名（集合）
+        self.found_files = []                           # 扫描到的完整文件路径列表
+        self.selected_files = []                        # 用户选中的文件列表
+        self.recursive_var = tk.BooleanVar(value=False) # 是否递归搜索（默认不递归）
+        self.regex_var = tk.BooleanVar(value=False)     # 是否使用正则表达式搜索（默认不使用）
 
-        # 创建界面
+        # 创建界面上的所有控件
         self.create_widgets()
 
-        # 绑定列表选择事件 → 更新预览
+        # 绑定事件：当用户在文件列表里点击/选择不同文件时，触发预览
         self.file_listbox.bind("<<ListboxSelect>>", self._on_listbox_select)
 
+    # ════════════════════════════════════════════════════════════
+    #  创建界面
+    # ════════════════════════════════════════════════════════════
+
     def create_widgets(self):
-        """创建GUI组件"""
-        # 主框架
+        """创建所有 GUI 组件（按钮、输入框、列表等）
+
+        界面从上到下分 5 个区域：
+          1. 源文件夹选择区
+          2. 搜索和筛选区（关键词 + 扩展名）
+          3. 文件列表 + 预览（左右分栏）
+          4. 文件操作区（复制/剪切/移动按钮）
+          5. 状态栏
+        """
+        # 主框架：所有控件都放在这个框架里，padding="10" 表示四周留10像素
         main_frame = ttk.Frame(self.root, padding="10")
         main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        # sticky 表示控件"粘"在网格的哪些边上：
+        #   tk.W=左, tk.E=右, tk.N=上, tk.S=下
+        # 四个都写 = 控件会拉伸填满整个格子
 
-        # 配置网格权重
-        self.root.columnconfigure(0, weight=1)
+        # 让主框架随窗口大小自动缩放
+        self.root.columnconfigure(0, weight=1)   # weight=1 表示这一列会自动拉伸
         self.root.rowconfigure(0, weight=1)
         main_frame.columnconfigure(0, weight=1)
-        main_frame.rowconfigure(3, weight=1)  # 文件列表+预览区域可伸缩
+        main_frame.rowconfigure(3, weight=1)     # 第3行（文件列表+预览）可伸缩
 
-        # ── 1. 文件夹选择区域 ──
+        # ── 区域 1：源文件夹选择 ──
+        # LabelFrame 是带标题的分组框
         folder_frame = ttk.LabelFrame(main_frame, text="源文件夹", padding="10")
         folder_frame.grid(row=0, column=0, sticky=(tk.W, tk.E), pady=5)
-        folder_frame.columnconfigure(1, weight=1)
+        folder_frame.columnconfigure(1, weight=1) # 输入框所在列可伸缩
 
         ttk.Label(folder_frame, text="路径:").grid(row=0, column=0, sticky=tk.W, padx=5)
+        # Entry 是文本输入框，textvariable 绑定到 self.folder_path
+        # 用户在输入框里改文字 = self.folder_path 自动更新，反过来也一样
         ttk.Entry(folder_frame, textvariable=self.folder_path, width=50).grid(
             row=0, column=1, sticky=(tk.W, tk.E), padx=5
         )
         ttk.Button(folder_frame, text="浏览...", command=self.browse_folder).grid(
             row=0, column=2, padx=5
         )
-        # 递归搜索复选框
+        # Checkbutton 是复选框，variable 绑定到 self.recursive_var
         ttk.Checkbutton(
             folder_frame, text="递归搜索子文件夹", variable=self.recursive_var
         ).grid(row=0, column=3, padx=10)
+        regex_cb = ttk.Checkbutton(
+            folder_frame, text="正则表达式", variable=self.regex_var
+        )
+        regex_cb.grid(row=0, column=4, padx=10)
+        # 鼠标悬浮提示：用通俗语言解释正则表达式是什么
+        ToolTip(regex_cb, "正则表达式：一种高级搜索方式，可以写更灵活的匹配规则。\n"
+                        "比如输入 \'\\d{4}\' 可以匹配4位数字，输入 \'jpg|png\' 可以同时匹配两种格式。\n"
+                        "如果你不了解正则表达式，保持不勾选即可，用普通关键词搜索就行。")
 
-        # ── 2. 搜索和筛选区域 ──
+        # ── 区域 2：搜索和筛选 ──
         search_frame = ttk.LabelFrame(main_frame, text="搜索和筛选", padding="10")
         search_frame.grid(row=1, column=0, sticky=(tk.W, tk.E), pady=5)
         search_frame.columnconfigure(0, weight=1)
 
-        # 关键词输入框
+        # 关键词输入框（多行文本框 + 滚动条）
         keyword_frame = ttk.Frame(search_frame)
         keyword_frame.grid(row=0, column=0, sticky=(tk.W, tk.E), padx=5, pady=5)
         keyword_frame.columnconfigure(1, weight=1)
 
         ttk.Label(keyword_frame, text="关键词(每行一个):").grid(row=0, column=0, sticky=tk.W, padx=5)
 
+        # Text 是多行文本输入框（和 Entry 不同，Text 支持多行）
         text_frame = ttk.Frame(keyword_frame)
         text_frame.grid(row=1, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=5)
 
         self.keyword_text = tk.Text(text_frame, height=3, width=60)
+        # 滚动条和文本框联动：滚动条控制文本框，文本框内容变化通知滚动条
         scrollbar_keyword = ttk.Scrollbar(text_frame, command=self.keyword_text.yview)
         self.keyword_text.configure(yscrollcommand=scrollbar_keyword.set)
         self.keyword_text.pack(side=tk.LEFT, fill=tk.X, expand=True)
         scrollbar_keyword.pack(side=tk.RIGHT, fill=tk.Y)
 
-        # 扫描按钮和清空按钮
+        # 扫描按钮和清空按钮（放在关键词框右侧）
         btn_col_frame = ttk.Frame(keyword_frame)
         btn_col_frame.grid(row=1, column=2, padx=5, sticky=tk.N)
         ttk.Button(btn_col_frame, text="扫描文件", command=self.scan_files).pack(pady=(0, 3))
         ttk.Button(btn_col_frame, text="清空关键词", command=self.clear_keywords).pack()
 
-        # 文件类型筛选
+        # 文件类型筛选按钮（全选/全不选/常用类型）
         ttk.Label(search_frame, text="文件类型筛选:").grid(
             row=1, column=0, sticky=tk.W, padx=5, pady=5
         )
@@ -214,11 +222,13 @@ class FileManagerApp:
         ttk.Button(type_frame, text="全不选", command=self.deselect_all_types).grid(row=0, column=1, padx=2)
         ttk.Button(type_frame, text="常用类型", command=self.select_common_types).grid(row=0, column=2, padx=2)
 
-        # 扩展名复选框容器（横向滚动）
-        self.extension_checkboxes = {}
+        # 扩展名复选框区域（横向滚动，用 Canvas 实现）
+        # 原理：Canvas 里面放一个 Frame，Frame 太宽时 Canvas 可以横向滚动
+        self.extension_checkboxes = {}            # {扩展名: BooleanVar} 的字典
         checkbox_outer = ttk.Frame(search_frame)
         checkbox_outer.grid(row=2, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=3)
 
+        # Canvas 用来承载扩展名复选框（支持横向滚动）
         self.checkbox_canvas = tk.Canvas(checkbox_outer, height=28, highlightthickness=0)
         h_scroll = ttk.Scrollbar(checkbox_outer, orient=tk.HORIZONTAL, command=self.checkbox_canvas.xview)
         self.checkbox_canvas.configure(xscrollcommand=h_scroll.set)
@@ -226,29 +236,32 @@ class FileManagerApp:
         self.checkbox_canvas.pack(side=tk.TOP, fill=tk.X, expand=True)
         h_scroll.pack(side=tk.BOTTOM, fill=tk.X)
 
+        # 复选框实际放在这个 Frame 里，嵌入 Canvas
         self.checkbox_container = ttk.Frame(self.checkbox_canvas)
+        # create_window 把 Frame 画到 Canvas 上
         self.checkbox_canvas_window = self.checkbox_canvas.create_window(
             (0, 0), window=self.checkbox_container, anchor=tk.NW
         )
-        # 内部框架大小变化时更新滚动区域
+        # 当内部 Frame 大小变化时，更新 Canvas 的滚动范围
         self.checkbox_container.bind("<Configure>", lambda e: self.checkbox_canvas.configure(
             scrollregion=self.checkbox_canvas.bbox("all")
         ))
-        # canvas 大小变化时让内部框架跟高度一致
+        # 当 Canvas 大小变化时，让内部 Frame 高度跟 Canvas 一致
         self.checkbox_canvas.bind("<Configure>", lambda e: self.checkbox_canvas.itemconfig(
             self.checkbox_canvas_window, height=e.height
         ))
 
-        # ── 3. 文件列表 + 预览（左右分栏） ──
+        # ── 区域 3：文件列表（左）+ 预览（右），用 PanedWindow 可拖拽调整比例 ──
         paned = ttk.PanedWindow(main_frame, orient=tk.HORIZONTAL)
         paned.grid(row=2, column=0, rowspan=2, sticky=(tk.W, tk.E, tk.N, tk.S), pady=5)
 
-        # 左侧：文件列表
+        # --- 左侧：文件列表 ---
         list_frame = ttk.LabelFrame(paned, text="找到的文件", padding="5")
         list_frame.columnconfigure(0, weight=1)
         list_frame.rowconfigure(0, weight=1)
-        paned.add(list_frame, weight=3)
+        paned.add(list_frame, weight=3)          # weight=3 表示左侧占 3 份宽度
 
+        # Listbox + Scrollbar（文件列表 + 滚动条）
         list_inner = ttk.Frame(list_frame)
         list_inner.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
         list_inner.columnconfigure(0, weight=1)
@@ -257,44 +270,46 @@ class FileManagerApp:
         scrollbar = ttk.Scrollbar(list_inner)
         scrollbar.grid(row=0, column=1, sticky=(tk.N, tk.S))
 
+        # selectmode=tk.MULTIPLE 允许用户同时选多个文件
         self.file_listbox = tk.Listbox(
             list_inner, selectmode=tk.MULTIPLE, yscrollcommand=scrollbar.set, height=12
         )
         self.file_listbox.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
         scrollbar.config(command=self.file_listbox.yview)
 
-        # 选择按钮
+        # 文件选择按钮（全选/全不选/反选）
         select_btn_frame = ttk.Frame(list_frame)
         select_btn_frame.grid(row=1, column=0, pady=3)
         ttk.Button(select_btn_frame, text="全选", command=self.select_all_files).pack(side=tk.LEFT, padx=3)
         ttk.Button(select_btn_frame, text="全不选", command=self.deselect_all_files).pack(side=tk.LEFT, padx=3)
         ttk.Button(select_btn_frame, text="反选", command=self.invert_selection).pack(side=tk.LEFT, padx=3)
 
-        # 剪贴板按钮
+        # 剪贴板操作按钮（这两个方法来自 ClipboardMixin）
         clipboard_frame = ttk.LabelFrame(list_frame, text="剪贴板操作", padding="3")
         clipboard_frame.grid(row=2, column=0, pady=3, sticky=(tk.W, tk.E))
         ttk.Button(clipboard_frame, text="复制路径到剪贴板", command=self.copy_paths_to_clipboard).pack(side=tk.LEFT, padx=3)
         ttk.Button(clipboard_frame, text="复制文件到剪贴板", command=self.copy_files_to_clipboard).pack(side=tk.LEFT, padx=3)
 
-        # 右侧：文件预览
+        # --- 右侧：文件预览 ---
         preview_frame = ttk.LabelFrame(paned, text="文件预览", padding="5")
         preview_frame.columnconfigure(0, weight=1)
         preview_frame.rowconfigure(1, weight=1)
-        paned.add(preview_frame, weight=2)
+        paned.add(preview_frame, weight=2)       # weight=2 表示右侧占 2 份宽度
 
-        # 预览文件信息
+        # 预览区顶部：文件元信息（文件名、大小、路径等）
         self.preview_info_var = tk.StringVar(value="选择文件以预览")
         ttk.Label(preview_frame, textvariable=self.preview_info_var, wraplength=350).grid(
             row=0, column=0, sticky=(tk.W, tk.E), pady=(0, 3)
         )
 
-        # 预览内容
+        # 预览区主体：可滚动的文本框，显示文件内容
+        # state=tk.DISABLED 表示只读（不能编辑），需要写入时临时设为 NORMAL
         self.preview_text = scrolledtext.ScrolledText(
             preview_frame, wrap=tk.WORD, state=tk.DISABLED, font=("Consolas", 10)
         )
         self.preview_text.grid(row=1, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
 
-        # ── 4. 操作区域 ──
+        # ── 区域 4：文件操作区 ──
         action_frame = ttk.LabelFrame(main_frame, text="文件操作", padding="10")
         action_frame.grid(row=4, column=0, sticky=(tk.W, tk.E), pady=5)
         action_frame.columnconfigure(1, weight=1)
@@ -305,45 +320,63 @@ class FileManagerApp:
         )
         ttk.Button(action_frame, text="浏览...", command=self.browse_target).grid(row=0, column=2, padx=5)
 
+        # 操作按钮：复制/剪切
         btn_frame = ttk.Frame(action_frame)
         btn_frame.grid(row=1, column=0, columnspan=3, pady=8)
+        # lambda: self.perform_action("copy") → 点击时调用 perform_action，传入 "copy" 参数
+        # 不能直接写 command=self.perform_action("copy")，因为那样会在创建按钮时就执行函数
         ttk.Button(btn_frame, text="复制到目标文件夹", command=lambda: self.perform_action("copy")).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="剪切到目标文件夹", command=lambda: self.perform_action("move")).pack(side=tk.LEFT, padx=5)
-        ttk.Button(btn_frame, text="直接移动", command=lambda: self.perform_action("direct_move")).pack(side=tk.LEFT, padx=5)
 
-        # ── 5. 状态栏 ──
+        # ── 区域 5：状态栏 ──
         self.status_var = tk.StringVar(value="就绪")
+        # relief=tk.SUNKEN 让标签有"凹下去"的视觉效果，像状态栏
         ttk.Label(main_frame, textvariable=self.status_var, relief=tk.SUNKEN).grid(
             row=5, column=0, sticky=(tk.W, tk.E), pady=3
         )
 
     # ════════════════════════════════════════════════════════════
-    #  文件夹浏览
+    #  文件夹浏览：弹出"选择文件夹"对话框
     # ════════════════════════════════════════════════════════════
 
     def browse_folder(self):
+        """弹出系统自带的"选择文件夹"对话框，选择源文件夹"""
         folder = filedialog.askdirectory(title="选择源文件夹")
-        if folder:
+        if folder:  # 用户选了文件夹（没点取消）
             self.folder_path.set(folder)
             self.status_var.set(f"已选择文件夹: {folder}")
 
     def browse_target(self):
+        """弹出"选择文件夹"对话框，选择目标文件夹"""
         folder = filedialog.askdirectory(title="选择目标文件夹")
         if folder:
             self.target_folder.set(folder)
             self.status_var.set(f"已选择目标文件夹: {folder}")
 
     # ════════════════════════════════════════════════════════════
-    #  扫描文件（支持递归）
+    #  扫描文件（支持递归 + 子线程，不卡 UI）
     # ════════════════════════════════════════════════════════════
 
     def clear_keywords(self):
         """清空关键词输入框"""
-        self.keyword_text.delete("1.0", tk.END)
+        self.keyword_text.delete("1.0", tk.END)  # "1.0" = 第1行第0列，tk.END = 最后
 
     def scan_files(self):
+        """扫描源文件夹中的文件
+
+        核心流程：
+        1. 读取用户输入的关键词和选中的扩展名
+        2. 在子线程中遍历文件夹（不卡 UI）
+        3. 遍历完成后回到主线程更新界面
+
+        为什么要用子线程？
+        os.walk 遍历大文件夹时可能要好几秒，
+        如果在主线程（UI线程）执行，界面会卡死无法操作。
+        所以把耗时的遍历操作放到子线程，遍历完再用 root.after() 回主线程更新 UI。
+        """
         source_folder = self.folder_path.get()
 
+        # 输入验证
         if not source_folder:
             messagebox.showwarning("警告", "请先选择源文件夹！")
             return
@@ -352,436 +385,227 @@ class FileManagerApp:
             messagebox.showerror("错误", "源文件夹不存在！")
             return
 
-        # 获取搜索关键词列表
+        # ── 读取筛选条件 ──
+        # 获取关键词：从多行文本框里读取，按换行分割，去掉空行和前后空格
         keyword_text = self.keyword_text.get("1.0", tk.END).strip()
         keywords = [kw.strip() for kw in keyword_text.split('\n') if kw.strip()] if keyword_text else []
 
-        # 获取选中的文件扩展名
+        # 获取选中的扩展名：遍历 extension_checkboxes 字典，找出被勾选的
         selected_extensions = [
             ext for ext, var in self.extension_checkboxes.items() if var.get()
         ]
 
         recursive = self.recursive_var.get()
+        use_regex = self.regex_var.get()
 
-        # 扫描文件
-        self.found_files = []
-        try:
-            if recursive:
-                # 递归遍历
-                for dirpath, dirnames, filenames in os.walk(source_folder):
-                    for fname in filenames:
-                        full_path = os.path.join(dirpath, fname)
-                        if self._match_file(fname, keywords, selected_extensions):
-                            self.found_files.append(full_path)
-            else:
-                # 仅当前目录
-                for item in os.listdir(source_folder):
-                    full_path = os.path.join(source_folder, item)
-                    if not os.path.isfile(full_path):
-                        continue
-                    if self._match_file(item, keywords, selected_extensions):
-                        self.found_files.append(full_path)
+        # 如果使用正则表达式，先验证所有关键词是否是有效的正则表达式
+        regex_patterns = None
+        if use_regex and keywords:
+            try:
+                regex_patterns = compile_regex_patterns(keywords)
+            except ValueError as e:
+                messagebox.showerror("正则表达式错误", str(e))
+                return
 
-            # 更新文件列表显示
-            self.update_file_list()
+        self.status_var.set("正在扫描文件...")
 
-            # 收集所有扩展名（首次扫描时）
-            if not self.all_extensions:
-                self.collect_extensions(source_folder, recursive)
+        # ── 子线程：执行耗时的文件遍历 ──
+        def _scan_thread():
+            found = []       # 存放匹配的文件完整路径
+            error_msg = None # 如果扫描出错，记录错误信息
+            try:
+                if recursive:
+                    # 递归模式：os.walk 会遍历所有子文件夹
+                    # 每次循环返回 (当前目录路径, 子目录列表, 文件名列表)
+                    for dirpath, dirnames, filenames in os.walk(source_folder):
+                        for fname in filenames:
+                            full_path = os.path.join(dirpath, fname)
+                            if match_file(fname, keywords, selected_extensions, regex_patterns):
+                                found.append(full_path)
+                else:
+                    # 非递归模式：只看源文件夹这一层
+                    for item in os.listdir(source_folder):
+                        full_path = os.path.join(source_folder, item)
+                        if not os.path.isfile(full_path):
+                            continue  # 跳过子文件夹，只处理文件
+                        if match_file(item, keywords, selected_extensions, regex_patterns):
+                            found.append(full_path)
+            except Exception as e:
+                # 获取完整的错误堆栈信息，方便调试
+                error_msg = f"{str(e)}\n{traceback.format_exc()}"
 
-            self.status_var.set(f"找到 {len(self.found_files)} 个文件" + ("（递归）" if recursive else ""))
+            # ── 回到主线程更新 UI ──
+            # tkinter 不允许在子线程里操作界面，所以用 root.after(0, 回调函数)
+            # 意思是"尽快在主线程里执行这个函数"
+            def _update_ui():
+                if error_msg:
+                    messagebox.showerror("错误", f"扫描文件时出错: {error_msg}")
+                    self.status_var.set("扫描失败")
+                    return
 
-        except Exception as e:
-            messagebox.showerror("错误", f"扫描文件时出错: {str(e)}")
+                self.found_files = found              # 保存扫描结果
+                self.update_file_list()               # 更新文件列表控件
+                self.collect_extensions(source_folder, recursive)  # 重新收集扩展名
+                self.status_var.set(f"找到 {len(self.found_files)} 个文件" + ("（递归）" if recursive else ""))
 
-    def _match_file(self, filename, keywords, selected_extensions):
-        """检查文件是否匹配关键词和扩展名筛选"""
-        _, ext = os.path.splitext(filename)
-        ext = ext.lower()
+            self.root.after(0, _update_ui)  # 调度到主线程执行
 
-        if selected_extensions and ext not in selected_extensions:
-            return False
+        # 启动子线程（daemon=True 表示主程序退出时自动结束此线程）
+        threading.Thread(target=_scan_thread, daemon=True).start()
 
-        if keywords:
-            name_lower = filename.lower()
-            if not any(kw.lower() in name_lower for kw in keywords):
-                return False
-
-        return True
+    # ════════════════════════════════════════════════════════════
+    #  收集扩展名：扫描文件夹后更新扩展名复选框
+    # ════════════════════════════════════════════════════════════
 
     def collect_extensions(self, folder, recursive=False):
-        """收集文件夹中所有的文件扩展名"""
-        self.all_extensions.clear()
+        """扫描文件夹，收集所有出现过的文件扩展名
+
+        每次扫描都会重新收集（之前是只有首次扫描才收集，导致换文件夹后扩展名不刷新）。
+        收集完后调用 create_extension_checkboxes() 更新界面上的复选框。
+        """
+        self.all_extensions.clear()  # 清空旧数据
+
         if recursive:
+            # 递归模式：遍历所有子文件夹
             for dirpath, _, filenames in os.walk(folder):
                 for fname in filenames:
                     _, ext = os.path.splitext(fname)
                     ext = ext.lower()
-                    if ext:
+                    if ext:  # 没有扩展名的文件跳过
                         self.all_extensions.add(ext)
         else:
+            # 非递归模式：只看源文件夹这一层
             for item in os.listdir(folder):
                 full_path = os.path.join(folder, item)
-                if os.path.isfile(full_path):
+                if os.path.isfile(full_path):  # 只处理文件，跳过子文件夹
                     _, ext = os.path.splitext(item)
                     ext = ext.lower()
                     if ext:
                         self.all_extensions.add(ext)
 
+        # 根据收集到的扩展名，创建界面上的复选框
         self.create_extension_checkboxes()
 
     def create_extension_checkboxes(self):
-        """创建扩展名复选框（横向排列）"""
+        """根据收集到的扩展名，创建横向排列的复选框
+
+        每次调用时：
+        1. 删除旧的复选框
+        2. 按字母顺序排列扩展名
+        3. 为每个扩展名创建一个 Checkbutton，默认全部勾选
+        """
+        # 销毁旧复选框
         for widget in self.checkbox_container.winfo_children():
             widget.destroy()
         self.extension_checkboxes.clear()
 
+        # 按字母排序（更直观）
         sorted_extensions = sorted(self.all_extensions)
 
+        # 为每个扩展名创建一个复选框
         for ext in sorted_extensions:
-            var = tk.BooleanVar(value=True)
+            var = tk.BooleanVar(value=True)  # 默认勾选
             cb = ttk.Checkbutton(self.checkbox_container, text=ext, variable=var)
-            cb.pack(side=tk.LEFT, padx=4, pady=2)
-            self.extension_checkboxes[ext] = var
+            cb.pack(side=tk.LEFT, padx=4, pady=2)  # 横向排列
+            self.extension_checkboxes[ext] = var    # 存入字典，方便后续查询
 
     # ════════════════════════════════════════════════════════════
-    #  文件类型筛选
+    #  文件类型筛选快捷操作
     # ════════════════════════════════════════════════════════════
 
     def select_all_types(self):
+        """全选所有扩展名"""
         for var in self.extension_checkboxes.values():
             var.set(True)
 
     def deselect_all_types(self):
+        """取消选择所有扩展名"""
         for var in self.extension_checkboxes.values():
             var.set(False)
 
     def select_common_types(self):
-        common_types = {
-            '.jpg', '.jpeg', '.png', '.gif', '.bmp',
-            '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx',
-            '.txt', '.csv',
-            '.mp3', '.mp4', '.avi', '.mkv',
-            '.zip', '.rar', '.7z',
-        }
+        """只选择常用文件类型（图片/文档/音视频/压缩包）"""
         for ext, var in self.extension_checkboxes.items():
-            var.set(ext in common_types)
+            var.set(ext in COMMON_TYPES)  # COMMON_TYPES 定义在 constants.py
 
     # ════════════════════════════════════════════════════════════
-    #  文件列表操作
+    #  文件列表操作（选择/取消选择）
     # ════════════════════════════════════════════════════════════
 
     def update_file_list(self):
-        self.file_listbox.delete(0, tk.END)
-        # 清空预览
-        self._clear_preview()
+        """把扫描到的文件显示到文件列表控件中
+
+        递归模式下显示相对路径（如 subfolder/photo.jpg），
+        非递归模式只显示文件名。
+        """
+        self.file_listbox.delete(0, tk.END)   # 清空列表
+        self._clear_preview()                   # 清空预览（来自 PreviewMixin）
+
         for file_path in self.found_files:
-            # 递归模式下显示相对路径
             source = self.folder_path.get()
             try:
+                # 计算相对于源文件夹的路径，如 "sub/photo.jpg"
                 display = os.path.relpath(file_path, source)
             except ValueError:
+                # 跨盘符时 relpath 会报 ValueError，退而显示文件名
                 display = os.path.basename(file_path)
             self.file_listbox.insert(tk.END, display)
 
     def select_all_files(self):
-        self.file_listbox.select_set(0, tk.END)
+        """全选文件列表中的所有文件"""
+        self.file_listbox.select_set(0, tk.END)  # 选中从第0行到最后一行
 
     def deselect_all_files(self):
+        """取消选择所有文件"""
         self.file_listbox.select_clear(0, tk.END)
 
     def invert_selection(self):
-        current_selection = set(self.file_listbox.curselection())
+        """反选：选中的变未选中，未选中的变选中"""
+        current_selection = set(self.file_listbox.curselection())  # 当前选中的行号
         total = self.file_listbox.size()
         self.file_listbox.select_clear(0, tk.END)
         for i in range(total):
-            if i not in current_selection:
+            if i not in current_selection:    # 之前没选中的，现在选中
                 self.file_listbox.select_set(i)
 
     # ════════════════════════════════════════════════════════════
-    #  文件预览
+    #  文件预览入口（连接 PreviewMixin）
     # ════════════════════════════════════════════════════════════
 
     def _on_listbox_select(self, event=None):
-        """列表选中时触发预览"""
-        sel = self.file_listbox.curselection()
+        """用户在文件列表中选中不同文件时，触发右侧预览
+
+        这个方法是事件处理器，由 <<ListboxSelect>> 事件自动调用。
+        """
+        sel = self.file_listbox.curselection()  # 获取当前选中的行号
         if not sel:
             self._clear_preview()
             return
-        idx = sel[0]
+        idx = sel[0]                            # 取第一个选中行
         if idx < len(self.found_files):
-            self._preview_file(self.found_files[idx])
-
-    def _clear_preview(self):
-        self.preview_info_var.set("选择文件以预览")
-        self.preview_text.config(state=tk.NORMAL)
-        self.preview_text.delete("1.0", tk.END)
-        self.preview_text.config(state=tk.DISABLED)
-
-    def _preview_file(self, file_path):
-        """预览文件内容或元信息"""
-        if not os.path.exists(file_path):
-            self.preview_info_var.set("文件不存在")
-            return
-
-        # 基本信息
-        stat = os.stat(file_path)
-        size = stat.st_size
-        mtime = datetime.datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S")
-        _, ext = os.path.splitext(file_path)
-        ext = ext.lower()
-
-        info_lines = [
-            f"📄 {os.path.basename(file_path)}",
-            f"大小: {self._fmt_size(size)}　　修改时间: {mtime}",
-            f"路径: {file_path}",
-        ]
-
-        self.preview_text.config(state=tk.NORMAL)
-        self.preview_text.delete("1.0", tk.END)
-
-        # 判断是否可预览
-        if ext in TEXT_PREVIEW_EXTS or size == 0:
-            self._preview_text_file(file_path, info_lines, size)
-        elif ext == '.docx':
-            self._preview_docx(file_path, info_lines)
-        elif ext in {'.xlsx', '.xlsm'}:
-            self._preview_office_xml(file_path, info_lines, "xl/worksheets/sheet", "xlsx")
-        elif ext in {'.pptx'}:
-            self._preview_office_xml(file_path, info_lines, "ppt/slides/slide", "pptx")
-        elif ext in {'.doc', '.xls', '.ppt'}:
-            info_lines.append("\n[旧版 Office 格式（.doc/.xls/.ppt）— 二进制格式，无法直接预览文本]")
-            info_lines.append("提示：可转换为 .docx/.xlsx/.pptx 后预览")
-            self.preview_info_var.set("\n".join(info_lines))
-        elif ext in {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.ico', '.webp', '.svg'}:
-            info_lines.append("\n[图片文件 — 无法在文本预览中显示]")
-            self.preview_info_var.set("\n".join(info_lines))
-        elif ext in {'.mp3', '.wav', '.flac', '.aac', '.ogg', '.wma'}:
-            info_lines.append("\n[音频文件]")
-            self.preview_info_var.set("\n".join(info_lines))
-        elif ext in {'.mp4', '.avi', '.mkv', '.mov', '.wmv', '.flv'}:
-            info_lines.append("\n[视频文件]")
-            self.preview_info_var.set("\n".join(info_lines))
-        elif ext in {'.zip', '.rar', '.7z', '.tar', '.gz', '.bz2'}:
-            info_lines.append("\n[压缩文件]")
-            self.preview_info_var.set("\n".join(info_lines))
-        elif ext in {'.pdf'}:
-            info_lines.append("\n[PDF 文件]")
-            self.preview_info_var.set("\n".join(info_lines))
-        else:
-            # 尝试作为文本读取
-            self._preview_text_file(file_path, info_lines, size, force=False)
-
-        self.preview_text.config(state=tk.DISABLED)
-
-    def _preview_text_file(self, file_path, info_lines, size, force=True):
-        """尝试预览文本文件内容"""
-        try:
-            if size > PREVIEW_MAX_BYTES:
-                # 只读前面部分
-                with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
-                    content = f.read(PREVIEW_MAX_BYTES)
-                info_lines.append(f"\n[文件较大，仅显示前 {PREVIEW_MAX_BYTES // 1024} KB]")
-                self.preview_text.insert(tk.END, content)
-                self.preview_text.insert(tk.END, "\n\n... (内容已截断)")
-            elif size == 0:
-                info_lines.append("\n[空文件]")
-            else:
-                with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
-                    content = f.read()
-                self.preview_text.insert(tk.END, content)
-        except Exception as e:
-            if force:
-                info_lines.append(f"\n[读取失败: {e}]")
-            else:
-                info_lines.append(f"\n[二进制文件，无法预览]")
-
-        self.preview_info_var.set("\n".join(info_lines))
-
-    def _preview_docx(self, file_path, info_lines):
-        """预览 .docx 文件内容（从 word/document.xml 提取纯文本）"""
-        import zipfile
-        import xml.etree.ElementTree as ET
-
-        try:
-            with zipfile.ZipFile(file_path, 'r') as z:
-                if 'word/document.xml' not in z.namelist():
-                    info_lines.append("\n[无法解析 docx 结构]")
-                    self.preview_info_var.set("\n".join(info_lines))
-                    return
-
-                with z.open('word/document.xml') as f:
-                    tree = ET.parse(f)
-
-            # 提取所有 <w:t> 标签的文本
-            ns = {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}
-            texts = []
-            for t_elem in tree.iter('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t'):
-                if t_elem.text:
-                    texts.append(t_elem.text)
-
-            # 提取段落结构（<w:p> 之间加换行）
-            paragraphs = []
-            p_elems = tree.iter('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}p')
-            for p in p_elems:
-                p_texts = []
-                for t in p.iter('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t'):
-                    if t.text:
-                        p_texts.append(t.text)
-                if p_texts:
-                    paragraphs.append(''.join(p_texts))
-
-            if paragraphs:
-                content = '\n'.join(paragraphs)
-                if len(content) > PREVIEW_MAX_BYTES:
-                    content = content[:PREVIEW_MAX_BYTES] + "\n\n... (内容已截断)"
-                self.preview_text.insert(tk.END, content)
-            else:
-                info_lines.append("\n[文档内容为空或无纯文本]")
-
-        except zipfile.BadZipFile:
-            info_lines.append("\n[文件损坏或不是有效的 docx 格式]")
-        except Exception as e:
-            info_lines.append(f"\n[解析失败: {e}]")
-
-        self.preview_info_var.set("\n".join(info_lines))
-
-    def _preview_office_xml(self, file_path, info_lines, content_prefix, office_type):
-        """预览 Office Open XML 格式（xlsx/pptx）的文本内容"""
-        import zipfile
-        import xml.etree.ElementTree as ET
-
-        try:
-            with zipfile.ZipFile(file_path, 'r') as z:
-                # 找到所有匹配的 XML 文件（如 xl/worksheets/sheet1.xml）
-                target_files = [n for n in z.namelist() if n.startswith(content_prefix)]
-
-                if not target_files:
-                    info_lines.append(f"\n[无法解析 {office_type} 结构]")
-                    self.preview_info_var.set("\n".join(info_lines))
-                    return
-
-                all_text = []
-                for xml_name in sorted(target_files):
-                    with z.open(xml_name) as f:
-                        tree = ET.parse(f)
-
-                    # 提取所有文本节点
-                    for elem in tree.iter():
-                        if elem.text and elem.text.strip():
-                            all_text.append(elem.text.strip())
-
-                if all_text:
-                    content = '\n'.join(all_text)
-                    if len(content) > PREVIEW_MAX_BYTES:
-                        content = content[:PREVIEW_MAX_BYTES] + "\n\n... (内容已截断)"
-                    self.preview_text.insert(tk.END, content)
-                else:
-                    info_lines.append(f"\n[{office_type} 文件无可提取的文本]")
-
-        except zipfile.BadZipFile:
-            info_lines.append("\n[文件损坏或格式不正确]")
-        except Exception as e:
-            info_lines.append(f"\n[解析失败: {e}]")
-
-        self.preview_info_var.set("\n".join(info_lines))
-
-    @staticmethod
-    def _fmt_size(size):
-        for unit in ('B', 'KB', 'MB', 'GB'):
-            if size < 1024:
-                return f"{size:.1f} {unit}"
-            size /= 1024
-        return f"{size:.1f} TB"
+            self._preview_file(self.found_files[idx])  # _preview_file 来自 PreviewMixin
 
     # ════════════════════════════════════════════════════════════
-    #  剪贴板操作
-    # ════════════════════════════════════════════════════════════
-
-    def copy_paths_to_clipboard(self):
-        selected_indices = self.file_listbox.curselection()
-        if not selected_indices:
-            messagebox.showwarning("警告", "请先选择要复制路径的文件！")
-            return
-
-        selected_files = [self.found_files[i] for i in selected_indices]
-        paths_text = '\n'.join(selected_files)
-
-        self.root.clipboard_clear()
-        self.root.clipboard_append(paths_text)
-        self.root.update()
-
-        self.status_var.set(f"已复制 {len(selected_files)} 个文件路径到剪贴板")
-        messagebox.showinfo("成功", f"已复制 {len(selected_files)} 个文件路径到剪贴板！\n\n可以直接在其他地方粘贴使用。")
-
-    def copy_files_to_clipboard(self):
-        selected_indices = self.file_listbox.curselection()
-        if not selected_indices:
-            messagebox.showwarning("警告", "请先选择要复制的文件！")
-            return
-
-        selected_files = [self.found_files[i] for i in selected_indices]
-
-        try:
-            system = platform.system()
-            if system == "Windows":
-                self._copy_files_windows(selected_files)
-            elif system == "Darwin":
-                self._copy_files_macos(selected_files)
-            else:
-                self._copy_files_linux(selected_files)
-
-            self.status_var.set(f"已复制 {len(selected_files)} 个文件到剪贴板")
-            messagebox.showinfo(
-                "成功",
-                f"已复制 {len(selected_files)} 个文件到剪贴板！\n\n"
-                f"现在可以在其他文件夹中按 Ctrl+V (Mac: Cmd+V) 粘贴文件。"
-            )
-        except Exception as e:
-            messagebox.showerror("错误", f"复制文件到剪贴板失败：{str(e)}")
-
-    def _copy_files_windows(self, files):
-        import subprocess
-        file_paths = ", ".join([f'"{f}"' for f in files])
-        powershell_script = f"Set-Clipboard -Path {file_paths}"
-        result = subprocess.run(["powershell", "-Command", powershell_script], capture_output=True, text=True)
-        if result.returncode != 0:
-            raise RuntimeError(f"PowerShell执行失败: {result.stderr}")
-
-    def _copy_files_macos(self, files):
-        import subprocess
-        posix_files = ", ".join([f'POSIX file "{f}"' for f in files])
-        script = f'''
-        tell application "Finder"
-            set theFiles to {{{posix_files}}}
-            set the clipboard to theFiles
-        end tell
-        '''
-        result = subprocess.run(['osascript', '-e', script], capture_output=True, text=True)
-        if result.returncode != 0:
-            raise RuntimeError(result.stderr)
-
-    def _copy_files_linux(self, files):
-        import subprocess
-        try:
-            file_uris = "\n".join([f"file://{f}" for f in files])
-            proc = subprocess.Popen(
-                ['xclip', '-selection', 'clipboard', '-t', 'text/uri-list'],
-                stdin=subprocess.PIPE
-            )
-            proc.communicate(input=file_uris.encode())
-            if proc.returncode != 0:
-                raise RuntimeError("xclip执行失败")
-        except FileNotFoundError:
-            raise RuntimeError("需要安装xclip工具（sudo apt-get install xclip）")
-
-    # ════════════════════════════════════════════════════════════
-    #  文件操作（带冲突处理）
+    #  文件操作：复制/剪切/移动（带冲突检测）
     # ════════════════════════════════════════════════════════════
 
     def perform_action(self, action):
+        """执行文件操作（复制/剪切/直接移动）
+
+        整体流程：
+        1. 验证输入（目标文件夹、选中的文件）
+        2. 检测冲突（目标已有同名文件 / 源文件之间同名）
+        3. 弹出冲突对话框让用户选择处理方式
+        4. 确认操作
+        5. 逐个执行，跟踪结果（成功/跳过/失败）
+        6. 显示结果
+
+        参数:
+            action: "copy"（复制）、"move"（剪切）
+        """
         target_folder = self.target_folder.get()
 
+        # ── 输入验证 ──
         if not target_folder:
             messagebox.showwarning("警告", "请先选择目标文件夹！")
             return
@@ -795,30 +619,31 @@ class FileManagerApp:
             messagebox.showwarning("警告", "请先选择要操作的文件！")
             return
 
+        # 根据列表选中索引，获取对应的完整文件路径
         selected_files = [self.found_files[i] for i in selected_indices]
 
-        action_names = {"copy": "复制", "move": "剪切", "direct_move": "直接移动"}
+        # 操作类型的中文名（显示给用户看）
+        action_names = {"copy": "复制", "move": "剪切"}
 
-        # ── 检测冲突（含源文件之间的同名冲突） ──
-        # 第一轮：找出与目标文件夹已有文件的冲突
-        # 第二轮：源文件之间同名的也算冲突
-        from collections import defaultdict
+        # ── 第一步：检测冲突 ──
+        # 按文件名分组，找出同名的情况
+        # defaultdict(list) 的好处：访问不存在的键时自动创建空列表，不会报错
         basename_groups = defaultdict(list)  # fname → [(src_path, dest_path), ...]
 
         for src_path in selected_files:
-            fname = os.path.basename(src_path)
-            dest_path = os.path.join(target_folder, fname)
+            fname = os.path.basename(src_path)                    # 只取文件名
+            dest_path = os.path.join(target_folder, fname)       # 目标路径
             basename_groups[fname].append((src_path, dest_path))
 
-        conflicts = []       # 需要用户决策的: (fname, src_path, dest_path, conflict_type)
-        no_conflict = []     # 无冲突的: (fname, src_path, dest_path)
+        conflicts = []       # 有冲突的文件: (文件名, 源路径, 目标路径, 冲突类型)
+        no_conflict = []     # 无冲突的文件: (文件名, 源路径, 目标路径)
 
         for fname, items in basename_groups.items():
-            dest_path = items[0][1]  # 共享同一个目标路径
-            target_exists = os.path.exists(dest_path)
+            dest_path = items[0][1]                # 同名文件共享同一个目标路径
+            target_exists = os.path.exists(dest_path)  # 目标文件夹是否已有同名文件
 
             if target_exists or len(items) > 1:
-                # 有冲突：目标已存在 或 源文件之间同名
+                # 有冲突：目标已有同名文件，或多个源文件同名
                 for src_path, _ in items:
                     if target_exists:
                         conflict_type = "目标文件夹中已存在同名文件"
@@ -829,20 +654,20 @@ class FileManagerApp:
                 # 无冲突
                 no_conflict.append((fname, items[0][0], dest_path))
 
-        # 处理冲突
-        conflict_map = {}  # src_path → "skip" | "overwrite" | "rename"
+        # ── 第二步：处理冲突（如果有） ──
+        conflict_map = {}  # src_path → "skip" / "overwrite" / "rename"
         if conflicts:
+            # 弹出冲突对话框
             dlg = ConflictDialog(self.root, conflicts)
-            self.root.wait_window(dlg)
-            if dlg.result is None:
+            self.root.wait_window(dlg)        # 等待对话框关闭
+            if dlg.result is None:            # 用户点了取消
                 self.status_var.set("操作已取消")
                 return
-            # dlg.result 是 {fname: decision}，但同名源文件可能有多个
-            # 需要按 src_path 精确映射
+            # 记录每个源文件的处理决策
             for fname, src_path, dest_path, _ in conflicts:
-                conflict_map[src_path] = dlg.result.get(fname, "skip")
+                conflict_map[src_path] = dlg.result.get(src_path, "skip")
 
-        # 确认操作
+        # ── 第三步：确认操作 ──
         total = len(selected_files)
         confirm = messagebox.askyesno(
             "确认操作",
@@ -851,15 +676,16 @@ class FileManagerApp:
         if not confirm:
             return
 
-        # 执行操作 — 跟踪已占用的目标路径，防止同名源文件互相覆盖
+        # ── 第四步：逐个执行操作 ──
+        # used_dest_paths 跟踪"已经被占用的目标路径"，
+        # 防止多个同名源文件互相覆盖（比如 A/a.txt 和 B/a.txt 都要放到目标文件夹）
         used_dest_paths = set()
         success_count = 0
         error_count = 0
         skip_count = 0
 
-        # 先处理无冲突的，再处理有冲突的
+        # 合并有冲突和无冲突的文件列表，去重
         all_items = [(f, s, d) for f, s, d, _ in conflicts] + no_conflict
-        # 去重（no_conflict 的 fname 不在 conflicts 里，不会重复）
         seen = set()
         ordered = []
         for fname, src_path, dest_path in all_items:
@@ -867,71 +693,98 @@ class FileManagerApp:
                 seen.add(src_path)
                 ordered.append((fname, src_path, dest_path))
 
+        # 逐个文件处理
+        failed_files = []  # 记录失败的文件名和原因
         for fname, src_path, dest_path in ordered:
-            # 检查是否有冲突决策
+            # 如果这个文件有冲突决策
             if src_path in conflict_map:
                 decision = conflict_map[src_path]
                 if decision == "skip":
                     skip_count += 1
-                    continue
+                    continue                              # 跳过，不处理
                 elif decision == "rename":
-                    dest_path = self._unique_dest(dest_path, used_dest_paths)
-                # "overwrite" → 直接用原 dest_path
+                    dest_path = self._unique_dest(dest_path, used_dest_paths)  # 重命名
 
-            # 无冲突文件也要检查：如果多个源文件同名，后续的会撞上前面已占用的路径
+            # 无冲突文件也要检查：前面可能已有同名文件占了目标路径
             elif dest_path in used_dest_paths:
-                # 源文件之间同名但没被标记为冲突（理论上不会走到这里，防御性处理）
                 dest_path = self._unique_dest(dest_path, used_dest_paths)
 
+            # 执行实际的文件操作
             try:
                 if action == "copy":
-                    shutil.copy2(src_path, dest_path)
-                elif action in ["move", "direct_move"]:
-                    shutil.move(src_path, dest_path)
-                used_dest_paths.add(dest_path)
+                    shutil.copy2(src_path, dest_path)     # 复制（保留元信息）
+                elif action == "move":
+                    shutil.move(src_path, dest_path)       # 移动
+                used_dest_paths.add(dest_path)             # 记录已占用的目标路径
                 success_count += 1
             except Exception as e:
                 error_count += 1
-                print(f"处理文件失败 {fname}: {str(e)}")
+                # 记录失败的文件名和原因
+                failed_files.append((fname, str(e)))
+                # 记录详细错误信息到控制台，方便调试
+                error_detail = traceback.format_exc()
+                print(f"处理文件失败 {fname}: {str(e)}\n{error_detail}")
 
-        # 显示结果
+        # ── 第五步：显示结果 ──
         result_parts = [f"操作完成！\n成功: {success_count} 个文件"]
         if skip_count > 0:
             result_parts.append(f"跳过: {skip_count} 个文件")
         if error_count > 0:
             result_parts.append(f"失败: {error_count} 个文件")
+            # 显示失败文件的详细信息（最多显示5个）
+            if failed_files:
+                result_parts.append("\n失败详情：")
+                for fname, reason in failed_files[:5]:
+                    result_parts.append(f"  • {fname}: {reason}")
+                if len(failed_files) > 5:
+                    result_parts.append(f"  ... 还有 {len(failed_files) - 5} 个文件")
         result_msg = "\n".join(result_parts)
 
         messagebox.showinfo("结果", result_msg)
         self.status_var.set(result_msg.replace("\n", ", "))
 
-        if action in ["move", "direct_move"]:
+        # 剪切/移动操作后，源文件夹的文件少了，需要重新扫描
+        if action == "move":
             self.scan_files()
 
     @staticmethod
     def _unique_dest(dest_path, used_paths=None):
-        """生成不冲突的文件名，如 file(1).txt, file(2).txt ...
-        
-        Args:
-            dest_path: 原始目标路径
-            used_paths: 已被占用的目标路径集合（可选），同时检查磁盘和集合
+        """生成不冲突的文件名
+
+        如果目标路径已被占用，自动加编号，如：
+          D:\target\file.txt  → D:\target\file(1).txt  → D:\target\file(2).txt
+
+        参数:
+            dest_path:  原始目标路径
+            used_paths: 已被占用的路径集合（同时检查磁盘文件和这个集合）
+
+        返回:
+            一个不冲突的新路径
         """
         if used_paths is None:
             used_paths = set()
-        
-        base, ext = os.path.splitext(dest_path)
+
+        base, ext = os.path.splitext(dest_path)  # 分离 "D:\target\file" 和 ".txt"
         counter = 1
+        # 循环直到找到一个不存在的路径
         while os.path.exists(dest_path) or dest_path in used_paths:
-            dest_path = f"{base}({counter}){ext}"
+            dest_path = f"{base}({counter}){ext}"  # file(1).txt, file(2).txt ...
             counter += 1
         return dest_path
 
 
+# ════════════════════════════════════════════════════════════
+#  程序入口
+# ════════════════════════════════════════════════════════════
+
 def main():
-    root = tk.Tk()
-    app = FileManagerApp(root)
-    root.mainloop()
+    """程序入口：创建主窗口，启动事件循环"""
+    root = tk.Tk()                           # 创建 tkinter 主窗口
+    app = FileManagerApp(root)               # 创建应用实例（构建界面）
+    root.mainloop()                          # 启动事件循环（程序开始响应用户操作）
 
 
+# 当直接运行这个文件时（python file_manager.py），执行 main()
+# 当被其他文件 import 时，不会执行 main()
 if __name__ == "__main__":
     main()
