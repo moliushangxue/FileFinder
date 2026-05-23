@@ -152,7 +152,7 @@ class ClipboardMixin:
         # 构造 AppleScript 需要的文件列表字符串
         # 每个文件路径写成 POSIX file "/path/to/file" 的格式，多个用逗号分隔
         # 注意：路径中的双引号需要转义成 \"，避免破坏 AppleScript 语法
-        posix_files = ", ".join([f'POSIX file "{f.replace(chr(34), chr(92)+chr(34))}"' for f in files])
+        posix_files = ", ".join([f'POSIX file "{f.replace(chr(92), chr(92)+chr(92)).replace(chr(34), chr(92)+chr(34))}"' for f in files])
         # AppleScript 脚本正文
         script = f'''
         tell application "Finder"
