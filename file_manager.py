@@ -16,18 +16,37 @@ FileFinder 主程序 - 批量文件筛选和操作工具
   - PreviewMixin（preview_mixin.py）：文件预览功能
   - ClipboardMixin（clipboard_mixin.py）：剪贴板操作功能
   - ConflictDialog（conflict_dialog.py）：冲突处理弹窗
-  - constants.py：全局常量和工具函数
+  - constants.py：全局常量（含 UI 配色）和工具函数
+
+界面说明（v2.2）：
+  - UI 框架从 tkinter.ttk 迁移到 customtkinter（CTk）
+  - 风格：浅色现代风 + 蓝色点缀，配色集中在 constants.UI
+  - 逻辑层（扫描/筛选/操作/冲突）与 v2.1 完全一致，只换 UI 层
 
 v2.0 - 新增：递归搜索子文件夹、文件预览、文件冲突处理
+v2.1 - 修复：覆盖冲突数据丢失、xlsx 预览、扫描并发防护
+v2.2 - 界面重做为 customtkinter 浅色现代风
 """
 
 import os
 import shutil                                     # 文件操作（复制、移动）
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox, scrolledtext
+from tkinter import filedialog, messagebox
 import threading                                  # 多线程，让扫描不卡 UI
 import traceback                                  # 获取完整的错误堆栈信息
 from collections import defaultdict               # 带默认值的字典
+
+import customtkinter as ctk                       # 现代化 UI 框架（基于 tkinter）
+
+# 导入项目的其他模块
+from constants import (
+    UI,
+    COMMON_TYPES, compile_regex_patterns, match_file,
+    CONFLICT_TARGET_EXISTS, CONFLICT_SOURCE_DUP,
+)
+from conflict_dialog import ConflictDialog        # 冲突处理对话框
+from preview_mixin import PreviewMixin            # 文件预览功能
+from clipboard_mixin import ClipboardMixin        # 剪贴板功能
 
 
 class ToolTip:
@@ -65,15 +84,17 @@ class ToolTip:
         tw.wm_geometry(f"+{x}+{y}")           # 设置位置
         tw.attributes('-topmost', True)        # 始终在最前面
 
-        # 在小窗口里放一个 Label 显示文字
+        # 现代风提示框：白底 + 浅灰边框（跟随 constants.UI 配色）
         label = tk.Label(
             tw, text=self.text,
             justify=tk.LEFT,                   # 文字左对齐
-            background="#ffffe0",              # 淡黄色背景（经典提示框颜色）
+            background=UI.CARD,                # 白底
+            foreground=UI.TEXT,                # 深色文字
             relief=tk.SOLID,                   # 实线边框
             borderwidth=1,
-            font=("Microsoft YaHei", 9),       # 微软雅黑 9号字
-            padx=8, pady=4                     # 文字周围留 8x4 像素空白
+            highlightbackground=UI.BORDER,
+            font=(UI.FONT, 9),
+            padx=10, pady=6
         )
         label.pack()
 
@@ -109,8 +130,17 @@ class FileManagerApp(PreviewMixin, ClipboardMixin):
             root: tkinter.Tk() 根窗口对象
         """
         self.root = root
-        self.root.title("FileFinder v2.1")
-        self.root.geometry("1100x750")
+        self.root.title("FileFinder v2.2")
+        # 自适应屏幕：winfo_screenwidth/height 与 geometry 同为逻辑单位，
+        # 直接比较即可。预留 100 像素给任务栏和标题栏，防止窗口超出屏幕底部。
+        # （CTk 内部会把逻辑单位乘 DPI 缩放系数转成物理像素，不用我们管）
+        sw = self.root.winfo_screenwidth()
+        sh = self.root.winfo_screenheight()
+        win_w = min(1150, sw - 40)
+        win_h = min(780, sh - 100)
+        self.root.geometry(f"{win_w}x{win_h}")
+        self.root.minsize(min(980, win_w), min(640, win_h))  # 最小尺寸不超过初始尺寸
+        self.root.configure(fg_color=UI.BG)       # 窗口底色
 
         # ── 界面变量 ──
         # StringVar 是 tkinter 的"可追踪变量"，和界面控件绑定后，
@@ -130,213 +160,307 @@ class FileManagerApp(PreviewMixin, ClipboardMixin):
         self.file_listbox.bind("<<ListboxSelect>>", self._on_listbox_select)
 
     # ════════════════════════════════════════════════════════════
+    #  界面搭建辅助：统一的卡片、标题、按钮样式
+    # ════════════════════════════════════════════════════════════
+
+    def _card(self, parent):
+        """创建一个"卡片"容器：白底 + 圆角，所有功能区都长在卡片上"""
+        return ctk.CTkFrame(
+            parent,
+            fg_color=UI.CARD,          # 白底
+            corner_radius=10,          # 圆角
+            border_width=1,
+            border_color=UI.BORDER,    # 浅灰描边，让卡片边界更清晰
+        )
+
+    def _card_title(self, card, text):
+        """卡片左上角的小标题（蓝色、加粗、小字号）"""
+        ctk.CTkLabel(
+            card, text=text,
+            font=(UI.FONT, 12, "bold"),
+            text_color=UI.ACCENT,
+        ).pack(anchor=tk.W, padx=12, pady=(10, 2))
+
+    def _make_button(self, parent, text, command, style="solid",
+                     width=80, height=32):
+        """创建统一风格的按钮
+
+        style:
+            "solid"   — 实心蓝底白字（主要操作）
+            "outline" — 蓝边蓝字白底（次要操作）
+            "ghost"   — 灰字透明底（最轻量的操作）
+        """
+        if style == "solid":
+            return ctk.CTkButton(
+                parent, text=text, command=command,
+                width=width, height=height, font=(UI.FONT, 12),
+                fg_color=UI.ACCENT, hover_color=UI.ACCENT_HOVER,
+            )
+        elif style == "outline":
+            return ctk.CTkButton(
+                parent, text=text, command=command,
+                width=width, height=height, font=(UI.FONT, 12),
+                fg_color=UI.CARD, hover_color=UI.ACCENT_LIGHT,
+                border_width=1, border_color=UI.ACCENT,
+                text_color=UI.ACCENT,
+            )
+        else:  # ghost
+            return ctk.CTkButton(
+                parent, text=text, command=command,
+                width=width, height=height, font=(UI.FONT, 11),
+                fg_color="transparent", hover_color=UI.ACCENT_LIGHT,
+                text_color=UI.TEXT_DIM,
+            )
+
+    # ════════════════════════════════════════════════════════════
     #  创建界面
     # ════════════════════════════════════════════════════════════
 
     def create_widgets(self):
-        """创建所有 GUI 组件（按钮、输入框、列表等）
+        """创建所有 GUI 组件
 
-        界面从上到下分 5 个区域：
-          1. 源文件夹选择区
-          2. 搜索和筛选区（关键词 + 扩展名）
-          3. 文件列表 + 预览（左右分栏）
-          4. 文件操作区（复制/剪切/移动按钮）
-          5. 状态栏
+        界面从上到下分 6 个区域：
+          0. 顶部标题栏（应用名 + 一句话说明）
+          1. 源文件夹卡片
+          2. 搜索和筛选卡片（关键词 + 扩展名）
+          3. 文件列表 + 预览（左右分栏，可伸缩）
+          4. 文件操作卡片
+          5. 底部状态栏
         """
-        # 主框架：所有控件都放在这个框架里，padding="10" 表示四周留10像素
-        main_frame = ttk.Frame(self.root, padding="10")
-        main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
-        # sticky 表示控件"粘"在网格的哪些边上：
-        #   tk.W=左, tk.E=右, tk.N=上, tk.S=下
-        # 四个都写 = 控件会拉伸填满整个格子
-
-        # 让主框架随窗口大小自动缩放
-        self.root.columnconfigure(0, weight=1)   # weight=1 表示这一列会自动拉伸
-        self.root.rowconfigure(0, weight=1)
-        main_frame.columnconfigure(0, weight=1)
-        main_frame.rowconfigure(3, weight=1)     # 第3行（文件列表+预览）可伸缩
-
-        # ── 区域 1：源文件夹选择 ──
-        # LabelFrame 是带标题的分组框
-        folder_frame = ttk.LabelFrame(main_frame, text="源文件夹", padding="10")
-        folder_frame.grid(row=0, column=0, sticky=(tk.W, tk.E), pady=5)
-        folder_frame.columnconfigure(1, weight=1) # 输入框所在列可伸缩
-
-        ttk.Label(folder_frame, text="路径:").grid(row=0, column=0, sticky=tk.W, padx=5)
-        # Entry 是文本输入框，textvariable 绑定到 self.folder_path
-        # 用户在输入框里改文字 = self.folder_path 自动更新，反过来也一样
-        ttk.Entry(folder_frame, textvariable=self.folder_path, width=50).grid(
-            row=0, column=1, sticky=(tk.W, tk.E), padx=5
+        # 状态栏先创建并 pack（side=BOTTOM）：
+        # pack 按调用顺序分配空间，先让状态栏占住底部 28 像素，
+        # 主容器再吃掉剩余空间，保证状态栏永远不会被挤出可视区。
+        self.status_var = tk.StringVar(value="就绪")
+        status_bar = ctk.CTkFrame(
+            self.root, height=28, corner_radius=0,
+            fg_color=UI.CARD,
         )
-        ttk.Button(folder_frame, text="浏览...", command=self.browse_folder).grid(
-            row=0, column=2, padx=5
+        status_bar.pack(fill=tk.X, side=tk.BOTTOM)
+        status_bar.pack_propagate(False)          # 固定高度，不被内容撑开
+        ctk.CTkLabel(
+            status_bar, textvariable=self.status_var,
+            font=(UI.FONT, 11), text_color=UI.TEXT_DIM,
+        ).pack(side=tk.LEFT, padx=12)
+
+        # 主容器：占满窗口剩余空间，四周留白 12 像素
+        # pack 布局从上到下堆叠；中间列表区用 expand 吃掉剩余空间
+        main = ctk.CTkFrame(self.root, fg_color="transparent")
+        main.pack(fill=tk.BOTH, expand=True, padx=12, pady=(10, 8))
+
+        # ── 区域 0：顶部标题栏 ──
+        header = ctk.CTkFrame(main, fg_color="transparent")
+        header.pack(fill=tk.X, pady=(0, 8))
+        ctk.CTkLabel(
+            header, text="FileFinder",
+            font=(UI.FONT, 20, "bold"), text_color=UI.TEXT,
+        ).pack(side=tk.LEFT)
+        ctk.CTkLabel(
+            header, text="  批量文件筛选与整理工具",
+            font=(UI.FONT, 12), text_color=UI.TEXT_DIM,
+        ).pack(side=tk.LEFT, pady=(6, 0))
+
+        # ── 区域 1：源文件夹卡片 ──
+        folder_card = self._card(main)
+        folder_card.pack(fill=tk.X, pady=(0, 8))
+        self._card_title(folder_card, "源文件夹")
+
+        folder_row = ctk.CTkFrame(folder_card, fg_color="transparent")
+        folder_row.pack(fill=tk.X, padx=12, pady=(0, 8))
+
+        # CTkEntry 是单行输入框，textvariable 绑定到 self.folder_path
+        ctk.CTkEntry(
+            folder_row, textvariable=self.folder_path,
+            placeholder_text="选择或输入要扫描的文件夹路径...",
+            font=(UI.FONT, 12), height=34,
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
+
+        self._make_button(folder_row, "浏览...", self.browse_folder).pack(side=tk.LEFT)
+
+        # 复选框行：递归 + 正则（放在第二行，避免第一行太挤）
+        opt_row = ctk.CTkFrame(folder_card, fg_color="transparent")
+        opt_row.pack(fill=tk.X, padx=12, pady=(0, 10))
+        ctk.CTkCheckBox(
+            opt_row, text="递归搜索子文件夹", variable=self.recursive_var,
+            font=(UI.FONT, 12), fg_color=UI.ACCENT, hover_color=UI.ACCENT_HOVER,
+        ).pack(side=tk.LEFT, padx=(0, 16))
+        regex_cb = ctk.CTkCheckBox(
+            opt_row, text="正则表达式", variable=self.regex_var,
+            font=(UI.FONT, 12), fg_color=UI.ACCENT, hover_color=UI.ACCENT_HOVER,
         )
-        # Checkbutton 是复选框，variable 绑定到 self.recursive_var
-        ttk.Checkbutton(
-            folder_frame, text="递归搜索子文件夹", variable=self.recursive_var
-        ).grid(row=0, column=3, padx=10)
-        regex_cb = ttk.Checkbutton(
-            folder_frame, text="正则表达式", variable=self.regex_var
-        )
-        regex_cb.grid(row=0, column=4, padx=10)
+        regex_cb.pack(side=tk.LEFT)
         # 鼠标悬浮提示：用通俗语言解释正则表达式是什么
         ToolTip(regex_cb, "正则表达式：一种高级搜索方式，可以写更灵活的匹配规则。\n"
                         "比如输入 \'\\d{4}\' 可以匹配4位数字，输入 \'jpg|png\' 可以同时匹配两种格式。\n"
                         "如果你不了解正则表达式，保持不勾选即可，用普通关键词搜索就行。")
 
-        # ── 区域 2：搜索和筛选 ──
-        search_frame = ttk.LabelFrame(main_frame, text="搜索和筛选", padding="10")
-        search_frame.grid(row=1, column=0, sticky=(tk.W, tk.E), pady=5)
-        search_frame.columnconfigure(0, weight=1)
+        # ── 区域 2：搜索和筛选卡片 ──
+        search_card = self._card(main)
+        search_card.pack(fill=tk.X, pady=(0, 8))
+        self._card_title(search_card, "搜索和筛选")
 
-        # 关键词输入框（多行文本框 + 滚动条）
-        keyword_frame = ttk.Frame(search_frame)
-        keyword_frame.grid(row=0, column=0, sticky=(tk.W, tk.E), padx=5, pady=5)
-        keyword_frame.columnconfigure(1, weight=1)
+        search_row = ctk.CTkFrame(search_card, fg_color="transparent")
+        search_row.pack(fill=tk.X, padx=12, pady=(0, 4))
 
-        ttk.Label(keyword_frame, text="关键词(每行一个):").grid(row=0, column=0, sticky=tk.W, padx=5)
-
-        # Text 是多行文本输入框（和 Entry 不同，Text 支持多行）
-        text_frame = ttk.Frame(keyword_frame)
-        text_frame.grid(row=1, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=5)
-
-        self.keyword_text = tk.Text(text_frame, height=3, width=60)
-        # 滚动条和文本框联动：滚动条控制文本框，文本框内容变化通知滚动条
-        scrollbar_keyword = ttk.Scrollbar(text_frame, command=self.keyword_text.yview)
-        self.keyword_text.configure(yscrollcommand=scrollbar_keyword.set)
-        self.keyword_text.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        scrollbar_keyword.pack(side=tk.RIGHT, fill=tk.Y)
+        # 关键词输入框（CTkTextbox 是多行文本框）
+        kw_box = ctk.CTkFrame(search_row, fg_color="transparent")
+        kw_box.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
+        ctk.CTkLabel(
+            kw_box, text="关键词（每行一个，留空表示不过滤）",
+            font=(UI.FONT, 11), text_color=UI.TEXT_DIM,
+        ).pack(anchor=tk.W, pady=(0, 3))
+        self.keyword_text = ctk.CTkTextbox(
+            kw_box, height=64, font=(UI.FONT, 12),
+            border_width=1, border_color=UI.BORDER,
+        )
+        self.keyword_text.pack(fill=tk.X)
 
         # 扫描按钮和清空按钮（放在关键词框右侧）
-        btn_col_frame = ttk.Frame(keyword_frame)
-        btn_col_frame.grid(row=1, column=2, padx=5, sticky=tk.N)
-        self.scan_button = ttk.Button(btn_col_frame, text="扫描文件", command=self.scan_files)
-        self.scan_button.pack(pady=(0, 3))
-        ttk.Button(btn_col_frame, text="清空关键词", command=self.clear_keywords).pack()
+        btn_col = ctk.CTkFrame(search_row, fg_color="transparent")
+        btn_col.pack(side=tk.LEFT, anchor=tk.S, pady=(20, 0))
+        self.scan_button = ctk.CTkButton(
+            btn_col, text="扫描文件", command=self.scan_files,
+            font=(UI.FONT, 13, "bold"), height=38, width=110,
+            fg_color=UI.ACCENT, hover_color=UI.ACCENT_HOVER,
+        )
+        self.scan_button.pack(pady=(0, 6))
+        self._make_button(btn_col, "清空关键词", self.clear_keywords,
+                          style="ghost", width=110).pack()
 
         # 文件类型筛选按钮（全选/全不选/常用类型）
-        ttk.Label(search_frame, text="文件类型筛选:").grid(
-            row=1, column=0, sticky=tk.W, padx=5, pady=5
-        )
-        type_frame = ttk.Frame(search_frame)
-        type_frame.grid(row=1, column=1, sticky=(tk.W, tk.E), padx=5)
+        type_row = ctk.CTkFrame(search_card, fg_color="transparent")
+        type_row.pack(fill=tk.X, padx=12, pady=(2, 0))
+        ctk.CTkLabel(
+            type_row, text="文件类型筛选:",
+            font=(UI.FONT, 11), text_color=UI.TEXT_DIM,
+        ).pack(side=tk.LEFT, padx=(0, 8))
+        self._make_button(type_row, "全选", self.select_all_types,
+                          style="ghost", width=64, height=26).pack(side=tk.LEFT, padx=(0, 4))
+        self._make_button(type_row, "全不选", self.deselect_all_types,
+                          style="ghost", width=64, height=26).pack(side=tk.LEFT, padx=(0, 4))
+        self._make_button(type_row, "常用类型", self.select_common_types,
+                          style="ghost", width=76, height=26).pack(side=tk.LEFT)
 
-        ttk.Button(type_frame, text="全选", command=self.select_all_types).grid(row=0, column=0, padx=2)
-        ttk.Button(type_frame, text="全不选", command=self.deselect_all_types).grid(row=0, column=1, padx=2)
-        ttk.Button(type_frame, text="常用类型", command=self.select_common_types).grid(row=0, column=2, padx=2)
-
-        # 扩展名复选框区域（横向滚动，用 Canvas 实现）
-        # 原理：Canvas 里面放一个 Frame，Frame 太宽时 Canvas 可以横向滚动
+        # 扩展名复选框区域（横向滚动的 CTkScrollableFrame）
         self.extension_checkboxes = {}            # {扩展名: BooleanVar} 的字典
-        checkbox_outer = ttk.Frame(search_frame)
-        checkbox_outer.grid(row=2, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=3)
-
-        # Canvas 用来承载扩展名复选框（支持横向滚动）
-        self.checkbox_canvas = tk.Canvas(checkbox_outer, height=28, highlightthickness=0)
-        h_scroll = ttk.Scrollbar(checkbox_outer, orient=tk.HORIZONTAL, command=self.checkbox_canvas.xview)
-        self.checkbox_canvas.configure(xscrollcommand=h_scroll.set)
-
-        self.checkbox_canvas.pack(side=tk.TOP, fill=tk.X, expand=True)
-        h_scroll.pack(side=tk.BOTTOM, fill=tk.X)
-
-        # 复选框实际放在这个 Frame 里，嵌入 Canvas
-        self.checkbox_container = ttk.Frame(self.checkbox_canvas)
-        # create_window 把 Frame 画到 Canvas 上
-        self.checkbox_canvas_window = self.checkbox_canvas.create_window(
-            (0, 0), window=self.checkbox_container, anchor=tk.NW
+        self.checkbox_container = ctk.CTkScrollableFrame(
+            search_card, orientation="horizontal", height=48,
+            fg_color=UI.BG,                       # 与窗口底色一致，形成"凹槽"感
         )
-        # 当内部 Frame 大小变化时，更新 Canvas 的滚动范围
-        self.checkbox_container.bind("<Configure>", lambda e: self.checkbox_canvas.configure(
-            scrollregion=self.checkbox_canvas.bbox("all")
-        ))
-        # 当 Canvas 大小变化时，让内部 Frame 高度跟 Canvas 一致
-        self.checkbox_canvas.bind("<Configure>", lambda e: self.checkbox_canvas.itemconfig(
-            self.checkbox_canvas_window, height=e.height
-        ))
+        self.checkbox_container.pack(fill=tk.X, padx=12, pady=(4, 10))
 
-        # ── 区域 3：文件列表（左）+ 预览（右），用 PanedWindow 可拖拽调整比例 ──
-        paned = ttk.PanedWindow(main_frame, orient=tk.HORIZONTAL)
-        paned.grid(row=2, column=0, rowspan=2, sticky=(tk.W, tk.E, tk.N, tk.S), pady=5)
+        # ── 区域 3：文件列表（左）+ 预览（右）──
+        # CTk 没有 PanedWindow，用 grid 两列实现，左:右 = 3:2
+        # 注意：content 先创建但不 pack，等操作卡片（区域4）pack 完再 pack，
+        # 保证操作卡片先占住底部空间，content 再吃中间剩余空间。
+        content = ctk.CTkFrame(main, fg_color="transparent")
+        content.columnconfigure(0, weight=3)      # 左列占 3 份
+        content.columnconfigure(1, weight=2)      # 右列占 2 份
+        content.rowconfigure(0, weight=1)
 
-        # --- 左侧：文件列表 ---
-        list_frame = ttk.LabelFrame(paned, text="找到的文件", padding="5")
-        list_frame.columnconfigure(0, weight=1)
-        list_frame.rowconfigure(0, weight=1)
-        paned.add(list_frame, weight=3)          # weight=3 表示左侧占 3 份宽度
+        # --- 左侧：文件列表卡片 ---
+        list_card = self._card(content)
+        list_card.grid(row=0, column=0, sticky="nsew", padx=(0, 4))
+        self._card_title(list_card, "找到的文件")
 
-        # Listbox + Scrollbar（文件列表 + 滚动条）
-        list_inner = ttk.Frame(list_frame)
-        list_inner.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
-        list_inner.columnconfigure(0, weight=1)
-        list_inner.rowconfigure(0, weight=1)
+        # tk.Listbox：CTk 没有列表控件，沿用 tk.Listbox 但手动配色融入风格
+        list_inner = ctk.CTkFrame(list_card, fg_color="transparent")
+        list_inner.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 4))
 
-        scrollbar = ttk.Scrollbar(list_inner)
-        scrollbar.grid(row=0, column=1, sticky=(tk.N, tk.S))
+        scrollbar = ctk.CTkScrollbar(list_inner)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
-        # selectmode=tk.MULTIPLE 允许用户同时选多个文件
         self.file_listbox = tk.Listbox(
-            list_inner, selectmode=tk.MULTIPLE, yscrollcommand=scrollbar.set, height=12
+            list_inner,
+            selectmode=tk.MULTIPLE,               # 允许同时选多个文件
+            yscrollcommand=scrollbar.set,
+            font=(UI.FONT, 11),
+            bg=UI.CARD, fg=UI.TEXT,               # 白底深字
+            selectbackground=UI.ACCENT,           # 选中行：蓝底
+            selectforeground="#ffffff",           # 选中行：白字
+            activestyle="none",                   # 去掉选中行的虚线框
+            relief=tk.FLAT, highlightthickness=1, # 扁平边框 + 1像素浅灰描边
+            highlightbackground=UI.BORDER,
+            highlightcolor=UI.BORDER,
         )
-        self.file_listbox.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
-        scrollbar.config(command=self.file_listbox.yview)
+        self.file_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.configure(command=self.file_listbox.yview)
 
         # 文件选择按钮（全选/全不选/反选）
-        select_btn_frame = ttk.Frame(list_frame)
-        select_btn_frame.grid(row=1, column=0, pady=3)
-        ttk.Button(select_btn_frame, text="全选", command=self.select_all_files).pack(side=tk.LEFT, padx=3)
-        ttk.Button(select_btn_frame, text="全不选", command=self.deselect_all_files).pack(side=tk.LEFT, padx=3)
-        ttk.Button(select_btn_frame, text="反选", command=self.invert_selection).pack(side=tk.LEFT, padx=3)
+        sel_row = ctk.CTkFrame(list_card, fg_color="transparent")
+        sel_row.pack(fill=tk.X, padx=12, pady=(0, 4))
+        self._make_button(sel_row, "全选", self.select_all_files,
+                          style="ghost", width=64, height=26).pack(side=tk.LEFT, padx=(0, 4))
+        self._make_button(sel_row, "全不选", self.deselect_all_files,
+                          style="ghost", width=64, height=26).pack(side=tk.LEFT, padx=(0, 4))
+        self._make_button(sel_row, "反选", self.invert_selection,
+                          style="ghost", width=64, height=26).pack(side=tk.LEFT)
 
         # 剪贴板操作按钮（这两个方法来自 ClipboardMixin）
-        clipboard_frame = ttk.LabelFrame(list_frame, text="剪贴板操作", padding="3")
-        clipboard_frame.grid(row=2, column=0, pady=3, sticky=(tk.W, tk.E))
-        ttk.Button(clipboard_frame, text="复制路径到剪贴板", command=self.copy_paths_to_clipboard).pack(side=tk.LEFT, padx=3)
-        ttk.Button(clipboard_frame, text="复制文件到剪贴板", command=self.copy_files_to_clipboard).pack(side=tk.LEFT, padx=3)
+        clip_row = ctk.CTkFrame(list_card, fg_color="transparent")
+        clip_row.pack(fill=tk.X, padx=12, pady=(0, 10))
+        self._make_button(clip_row, "复制路径到剪贴板", self.copy_paths_to_clipboard,
+                          style="outline", height=28).pack(side=tk.LEFT, padx=(0, 6))
+        self._make_button(clip_row, "复制文件到剪贴板", self.copy_files_to_clipboard,
+                          style="outline", height=28).pack(side=tk.LEFT)
 
-        # --- 右侧：文件预览 ---
-        preview_frame = ttk.LabelFrame(paned, text="文件预览", padding="5")
-        preview_frame.columnconfigure(0, weight=1)
-        preview_frame.rowconfigure(1, weight=1)
-        paned.add(preview_frame, weight=2)       # weight=2 表示右侧占 2 份宽度
+        # --- 右侧：文件预览卡片 ---
+        preview_card = self._card(content)
+        preview_card.grid(row=0, column=1, sticky="nsew", padx=(4, 0))
+        self._card_title(preview_card, "文件预览")
 
         # 预览区顶部：文件元信息（文件名、大小、路径等）
         self.preview_info_var = tk.StringVar(value="选择文件以预览")
-        ttk.Label(preview_frame, textvariable=self.preview_info_var, wraplength=350).grid(
-            row=0, column=0, sticky=(tk.W, tk.E), pady=(0, 3)
-        )
+        ctk.CTkLabel(
+            preview_card, textvariable=self.preview_info_var,
+            font=(UI.FONT, 11), text_color=UI.TEXT_DIM,
+            justify=tk.LEFT, anchor=tk.W, wraplength=360,
+        ).pack(fill=tk.X, padx=12, pady=(0, 4))
 
-        # 预览区主体：可滚动的文本框，显示文件内容
-        # state=tk.DISABLED 表示只读（不能编辑），需要写入时临时设为 NORMAL
-        self.preview_text = scrolledtext.ScrolledText(
-            preview_frame, wrap=tk.WORD, state=tk.DISABLED, font=("Consolas", 10)
+        # 预览区主体：CTkTextbox 只读显示文件内容
+        self.preview_text = ctk.CTkTextbox(
+            preview_card, wrap="word",
+            font=(UI.FONT_MONO, 11),              # 等宽字体看代码/日志更整齐
+            border_width=1, border_color=UI.BORDER,
         )
-        self.preview_text.grid(row=1, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        self.preview_text.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 10))
+        self.preview_text.configure(state="disabled")  # 只读，写入时临时打开
 
-        # ── 区域 4：文件操作区 ──
-        action_frame = ttk.LabelFrame(main_frame, text="文件操作", padding="10")
-        action_frame.grid(row=4, column=0, sticky=(tk.W, tk.E), pady=5)
-        action_frame.columnconfigure(1, weight=1)
+        # ── 区域 4：文件操作卡片（side=BOTTOM 钉在主容器底部）──
+        action_card = self._card(main)
+        action_card.pack(fill=tk.X, side=tk.BOTTOM)
+        self._card_title(action_card, "文件操作")
 
-        ttk.Label(action_frame, text="目标文件夹:").grid(row=0, column=0, sticky=tk.W, padx=5)
-        ttk.Entry(action_frame, textvariable=self.target_folder, width=50).grid(
-            row=0, column=1, sticky=(tk.W, tk.E), padx=5
-        )
-        ttk.Button(action_frame, text="浏览...", command=self.browse_target).grid(row=0, column=2, padx=5)
+        target_row = ctk.CTkFrame(action_card, fg_color="transparent")
+        target_row.pack(fill=tk.X, padx=12, pady=(0, 8))
+        ctk.CTkEntry(
+            target_row, textvariable=self.target_folder,
+            placeholder_text="选择目标文件夹...",
+            font=(UI.FONT, 12), height=34,
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
+        self._make_button(target_row, "浏览...", self.browse_target).pack(side=tk.LEFT)
 
         # 操作按钮：复制/剪切
-        btn_frame = ttk.Frame(action_frame)
-        btn_frame.grid(row=1, column=0, columnspan=3, pady=8)
+        op_row = ctk.CTkFrame(action_card, fg_color="transparent")
+        op_row.pack(fill=tk.X, padx=12, pady=(0, 10))
         # lambda: self.perform_action("copy") → 点击时调用 perform_action，传入 "copy" 参数
         # 不能直接写 command=self.perform_action("copy")，因为那样会在创建按钮时就执行函数
-        ttk.Button(btn_frame, text="复制到目标文件夹", command=lambda: self.perform_action("copy")).pack(side=tk.LEFT, padx=5)
-        ttk.Button(btn_frame, text="剪切到目标文件夹", command=lambda: self.perform_action("move")).pack(side=tk.LEFT, padx=5)
+        ctk.CTkButton(
+            op_row, text="复制到目标文件夹",
+            command=lambda: self.perform_action("copy"),
+            font=(UI.FONT, 12, "bold"), height=34, width=150,
+            fg_color=UI.ACCENT, hover_color=UI.ACCENT_HOVER,
+        ).pack(side=tk.LEFT, padx=(0, 8))
+        ctk.CTkButton(
+            op_row, text="剪切到目标文件夹",
+            command=lambda: self.perform_action("move"),
+            font=(UI.FONT, 12, "bold"), height=34, width=150,
+            fg_color=UI.ACCENT, hover_color=UI.ACCENT_HOVER,
+        ).pack(side=tk.LEFT)
 
-        # ── 区域 5：状态栏 ──
-        self.status_var = tk.StringVar(value="就绪")
-        # relief=tk.SUNKEN 让标签有"凹下去"的视觉效果，像状态栏
-        ttk.Label(main_frame, textvariable=self.status_var, relief=tk.SUNKEN).grid(
-            row=5, column=0, sticky=(tk.W, tk.E), pady=3
-        )
+        # ── 区域 3 的 content 现在才 pack ──
+        # 此时顶部卡片（header/源文件夹/搜索）和底部卡片（操作）都已各就各位，
+        # content 用 expand 吃掉中间剩余的全部空间。
+        content.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
 
     # ════════════════════════════════════════════════════════════
     #  文件夹浏览：弹出"选择文件夹"对话框
@@ -412,7 +536,7 @@ class FileManagerApp(PreviewMixin, ClipboardMixin):
                 return
 
         self.status_var.set("正在扫描文件...")
-        self.scan_button.config(state=tk.DISABLED)  # 扫描期间禁用按钮，防止重复点击
+        self.scan_button.configure(state="disabled")  # 扫描期间禁用按钮，防止重复点击
         self._scan_generation += 1                  # 代际+1：旧线程的结果会被丢弃
         generation = self._scan_generation
 
@@ -450,7 +574,7 @@ class FileManagerApp(PreviewMixin, ClipboardMixin):
 
             # ── 回到主线程更新 UI ──
             def _update_ui():
-                self.scan_button.config(state=tk.NORMAL)  # 恢复扫描按钮
+                self.scan_button.configure(state="normal")  # 恢复扫描按钮
                 if generation != self._scan_generation:
                     return  # 已有更新的扫描在进行/完成，丢弃这份过期结果
                 if error_msg:
@@ -488,8 +612,13 @@ class FileManagerApp(PreviewMixin, ClipboardMixin):
         # 为每个扩展名创建一个复选框
         for ext in sorted_extensions:
             var = tk.BooleanVar(value=True)  # 默认勾选
-            cb = ttk.Checkbutton(self.checkbox_container, text=ext, variable=var)
-            cb.pack(side=tk.LEFT, padx=4, pady=2)  # 横向排列
+            cb = ctk.CTkCheckBox(
+                self.checkbox_container, text=ext, variable=var,
+                font=(UI.FONT, 11),
+                fg_color=UI.ACCENT, hover_color=UI.ACCENT_HOVER,
+                width=20,                        # 复选框本身小一点，排得更紧凑
+            )
+            cb.pack(side=tk.LEFT, padx=6, pady=2)  # 横向排列
             self.extension_checkboxes[ext] = var    # 存入字典，方便后续查询
 
     # ════════════════════════════════════════════════════════════
@@ -774,7 +903,11 @@ class FileManagerApp(PreviewMixin, ClipboardMixin):
 
 def main():
     """程序入口：创建主窗口，启动事件循环"""
-    root = tk.Tk()                           # 创建 tkinter 主窗口
+    # customtkinter 全局设置：浅色模式 + 蓝色主题
+    ctk.set_appearance_mode("light")
+    ctk.set_default_color_theme("blue")
+
+    root = ctk.CTk()                         # 创建 CTk 主窗口（底层仍是 tkinter）
     app = FileManagerApp(root)               # 创建应用实例（构建界面）
     root.mainloop()                          # 启动事件循环（程序开始响应用户操作）
 

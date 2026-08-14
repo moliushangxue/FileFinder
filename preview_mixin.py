@@ -43,9 +43,9 @@ class PreviewMixin:
     def _clear_preview(self):
         """清空右侧预览面板，恢复到初始状态"""
         self.preview_info_var.set("选择文件以预览")       # 顶部元信息
-        self.preview_text.config(state=tk.NORMAL)           # 打开编辑权限（才能清空）
+        self.preview_text.configure(state=tk.NORMAL)           # 打开编辑权限（才能清空）
         self.preview_text.delete("1.0", tk.END)           # 删除所有内容（"1.0"=第1行第0列）
-        self.preview_text.config(state=tk.DISABLED)         # 关闭编辑权限（只读）
+        self.preview_text.configure(state=tk.DISABLED)         # 关闭编辑权限（只读）
 
     # ════════════════════════════════════════════════════════════
     #  预览入口：根据文件类型分发到不同方法
@@ -82,7 +82,7 @@ class PreviewMixin:
         ]
 
         # 打开预览文本框，准备写入内容
-        self.preview_text.config(state=tk.NORMAL)
+        self.preview_text.configure(state=tk.NORMAL)
         self.preview_text.delete("1.0", tk.END)
 
         # ── 根据扩展名分发到不同的预览方法 ──
@@ -123,7 +123,7 @@ class PreviewMixin:
             self._preview_text_file(file_path, info_lines, size, force=False)
 
         # 关闭文本框编辑权限
-        self.preview_text.config(state=tk.DISABLED)
+        self.preview_text.configure(state=tk.DISABLED)
 
     # ════════════════════════════════════════════════════════════
     #  文本文件预览
