@@ -24,10 +24,9 @@ import zipfile
 import xml.etree.ElementTree as ET
 
 import tkinter as tk
-from tkinter import scrolledtext
 
 # 从 constants.py 导入预览所需常量和工具函数
-from constants import PREVIEW_MAX_BYTES, TEXT_PREVIEW_EXTS, _fmt_size
+from constants import PREVIEW_MAX_BYTES, TEXT_PREVIEW_EXTS, fmt_size
 
 
 class PreviewMixin:
@@ -63,7 +62,12 @@ class PreviewMixin:
             return
 
         # ── 获取文件元信息 ──
-        stat = os.stat(file_path)                          # 获取文件状态（大小、修改时间等）
+        # exists() 和 stat() 之间文件可能被删除/占用（TOCTOU），所以要兜底
+        try:
+            stat = os.stat(file_path)                      # 获取文件状态（大小、修改时间等）
+        except OSError as e:
+            self.preview_info_var.set(f"无法读取文件信息: {e}")
+            return
         size = stat.st_size                                # 文件大小（字节）
         # 把时间戳（秒数）转换成可读格式，如 "2026-05-21 23:28:00"
         mtime = datetime.datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S")
@@ -73,7 +77,7 @@ class PreviewMixin:
         # 顶部显示的基本信息（文件名、大小、修改时间、路径）
         info_lines = [
             f"📄 {os.path.basename(file_path)}",
-            f"大小: {_fmt_size(size)}　　修改时间: {mtime}",
+            f"大小: {fmt_size(size)}　　修改时间: {mtime}",
             f"路径: {file_path}",
         ]
 
@@ -250,16 +254,13 @@ class PreviewMixin:
                     self.preview_info_var.set("\n".join(info_lines))
                     return
 
-                # 遍历每个 XML 文件，提取文本
-                all_text = []
-                for xml_name in sorted(target_files):
-                    with z.open(xml_name) as f:
-                        tree = ET.parse(f)
-
-                    # 遍历 XML 里所有有文本的节点
-                    for elem in tree.iter():
-                        if elem.text and elem.text.strip():
-                            all_text.append(elem.text.strip())
+                if office_type == "xlsx":
+                    # xlsx 的字符串单元格存的不是文字本身，
+                    # 而是 xl/sharedStrings.xml 里的索引数字，
+                    # 必须先解析共享字符串表再做映射，否则预览全是数字。
+                    all_text = self._extract_xlsx_text(z, target_files)
+                else:
+                    all_text = self._extract_xml_texts(z, target_files)
 
                 # 显示提取到的文本
                 if all_text:
@@ -276,3 +277,71 @@ class PreviewMixin:
             info_lines.append(f"\n[解析失败: {e}]")
 
         self.preview_info_var.set("\n".join(info_lines))
+
+    # ════════════════════════════════════════════════════════════
+    #  Office XML 文本提取辅助方法
+    # ════════════════════════════════════════════════════════════
+
+    @staticmethod
+    def _extract_xml_texts(z, xml_names):
+        """通用提取：遍历每个 XML 文件，收集所有非空文本节点（pptx 用）"""
+        all_text = []
+        for xml_name in sorted(xml_names):
+            with z.open(xml_name) as f:
+                tree = ET.parse(f)
+            for elem in tree.iter():
+                if elem.text and elem.text.strip():
+                    all_text.append(elem.text.strip())
+        return all_text
+
+    @staticmethod
+    def _extract_xlsx_text(z, sheet_names):
+        """xlsx 专用提取：把共享字符串索引映射回真实文字
+
+        xlsx 存储结构：
+          - xl/sharedStrings.xml：所有字符串集中存放，每个 <si> 是一段文字
+          - xl/worksheets/sheetN.xml：单元格 <c t="s"><v>索引</v></c>
+            t="s" 表示这个单元格是字符串，<v> 里的数字是 sharedStrings 的索引
+
+        输出格式：每行一个表格行，单元格之间用制表符分隔（贴近表格原貌）
+        """
+        ns = '{http://schemas.openxmlformats.org/spreadsheetml/2006/main}'
+
+        # ── 第一步：读取共享字符串表 ──
+        shared_strings = []
+        if 'xl/sharedStrings.xml' in z.namelist():
+            with z.open('xl/sharedStrings.xml') as f:
+                tree = ET.parse(f)
+            for si in tree.iter(f'{ns}si'):
+                # 一个 <si> 里可能有多个 <t>（富文本片段），拼起来
+                text = ''.join(t.text or '' for t in si.iter(f'{ns}t'))
+                shared_strings.append(text)
+
+        # ── 第二步：按 sheet 提取单元格内容 ──
+        all_text = []
+        # sheet10 会排在 sheet2 前面，按文件名里的数字排序更符合直觉
+        def sheet_sort_key(name):
+            base = name.rsplit('/', 1)[-1]           # "sheet12.xml"
+            digits = ''.join(ch for ch in base if ch.isdigit())
+            return int(digits) if digits else 0
+
+        for sheet_name in sorted(sheet_names, key=sheet_sort_key):
+            with z.open(sheet_name) as f:
+                tree = ET.parse(f)
+            for row in tree.iter(f'{ns}row'):
+                cells = []
+                for c in row.iter(f'{ns}c'):
+                    v = c.find(f'{ns}v')
+                    if v is None or v.text is None:
+                        continue
+                    if c.get('t') == 's':
+                        # 字符串单元格：v 里是共享字符串索引
+                        try:
+                            cells.append(shared_strings[int(v.text)])
+                        except (ValueError, IndexError):
+                            cells.append(v.text)     # 索引异常时退而显示原始值
+                    else:
+                        cells.append(v.text)         # 数字/日期等直接显示
+                if cells:
+                    all_text.append('\t'.join(cells))
+        return all_text

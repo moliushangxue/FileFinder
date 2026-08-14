@@ -16,8 +16,16 @@ import os
 import tkinter as tk
 from tkinter import ttk
 
-# 从 constants.py 导入格式化函数，用于显示文件大小
-from constants import _fmt_size
+# 从 constants.py 导入格式化函数和冲突类型常量
+from constants import fmt_size, CONFLICT_TARGET_EXISTS
+
+
+def _safe_size(path):
+    """安全获取文件大小：文件被占用/删除/无权限时返回 0，不让弹窗崩掉"""
+    try:
+        return os.path.getsize(path)
+    except OSError:
+        return 0
 
 
 class ConflictDialog(tk.Toplevel):
@@ -45,7 +53,6 @@ class ConflictDialog(tk.Toplevel):
         # result 字典：记录每个源文件的处理决策
         # 键是源文件路径，值是 "skip" / "overwrite" / "rename" 之一
         self.result = {}
-        self._apply_all = None                   # 记录"全部xxx"的操作
 
         self._build_ui()
         # 点右上角 X 按钮时调用 _on_cancel（等同取消）
@@ -62,8 +69,8 @@ class ConflictDialog(tk.Toplevel):
 
         # ── 顶部：统计冲突类型 ──
         # 遍历 conflicts，统计"与目标文件夹冲突"和"源文件之间同名"各有多少
-        target_conflicts = sum(1 for _, _, _, ct in self.conflicts if "目标" in ct)
-        source_conflicts = sum(1 for _, _, _, ct in self.conflicts if "源文件" in ct)
+        target_conflicts = sum(1 for _, _, _, ct in self.conflicts if ct == CONFLICT_TARGET_EXISTS)
+        source_conflicts = len(self.conflicts) - target_conflicts
 
         summary_parts = []
         if target_conflicts:
@@ -90,19 +97,19 @@ class ConflictDialog(tk.Toplevel):
 
         # 遍历每个冲突，显示文件名、冲突类型、文件大小
         for fname, src, dest, conflict_type in self.conflicts:
-            src_size = os.path.getsize(src) if os.path.exists(src) else 0
-            if "源文件" in conflict_type:
+            src_size = _safe_size(src)
+            if conflict_type != CONFLICT_TARGET_EXISTS:
                 # 源文件之间同名冲突：只显示源文件大小
                 self.listbox.insert(
                     tk.END,
-                    f"⚠ {fname}  — {conflict_type}（大小: {_fmt_size(src_size)}）"
+                    f"⚠ {fname}  — {conflict_type}（大小: {fmt_size(src_size)}）"
                 )
             else:
                 # 目标文件夹已有同名：显示源和目标的大小对比
-                dest_size = os.path.getsize(dest) if os.path.exists(dest) else 0
+                dest_size = _safe_size(dest)
                 self.listbox.insert(
                     tk.END,
-                    f"⚠ {fname}  — {conflict_type}（源: {_fmt_size(src_size)} → 目标: {_fmt_size(dest_size)}）"
+                    f"⚠ {fname}  — {conflict_type}（源: {fmt_size(src_size)} → 目标: {fmt_size(dest_size)}）"
                 )
 
         # ── 底部：操作按钮 ──
@@ -120,7 +127,6 @@ class ConflictDialog(tk.Toplevel):
 
         把所有冲突文件的决策统一设为 action，然后关闭对话框。
         """
-        self._apply_all = action
         for _, src_path, _, _ in self.conflicts:
             self.result[src_path] = action        # 每个源文件 → 对应决策
         self.destroy()                            # 关闭对话框

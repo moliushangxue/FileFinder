@@ -10,15 +10,13 @@ Mixin 模式：把"剪贴板相关功能"从主类里拆出来，单独放一个
 这样用户就可以在资源管理器里直接 Ctrl+V 粘贴文件了。
 
 支持三个平台：
-  - Windows：用 PowerShell 的 Set-Clipboard -Path
+  - Windows：用 .NET 的 System.Windows.Forms.Clipboard.SetFileDropList
   - macOS：用 AppleScript 告诉 Finder 把文件放入剪贴板
   - Linux：用 xclip 工具，往 clipboard 写入 file:// 格式的 URI
 """
 
-import os
 import platform
 import subprocess
-import tempfile
 import urllib.parse
 
 from tkinter import messagebox
@@ -106,37 +104,51 @@ class ClipboardMixin:
 
     @staticmethod
     def _copy_files_windows(files):
-        """Windows 平台：用 PowerShell 的 Set-Clipboard -Path 复制文件
+        """Windows 平台：使用 .NET 的 FileDrop 格式复制文件到剪贴板
 
-        ⚠️ 安全说明（重要）：
-        文件名里可能包含特殊字符（如 ' $(cmd) 等），
-        如果直接拼进 PowerShell 命令字符串，会被当成代码执行（命令注入）。
-        所以这里不直接拼文件名，而是：
-          1. 先把所有文件路径写进一个临时 txt 文件
-          2. 让 PowerShell 读取这个 txt 文件，再传给 Set-Clipboard
-        这样文件名里的特殊字符就永远不会被 PowerShell 当成代码执行了。
+        PowerShell 的 Set-Clipboard -Path 不能复制文件对象，
+        所以这里使用 .NET 的 System.Windows.Forms 来创建 FileDrop 格式的剪贴板数据。
+
+        注意：必须使用 -STA 参数启动 PowerShell，因为 System.Windows.Forms.Clipboard
+        是 Windows Forms API，必须在单线程公寓（STA）模式下运行。
+
+        安全说明：通过 stdin 传递文件列表（每行一个路径），避免字符串拼接，
+        彻底消除命令注入风险。
         """
-        # 创建临时文件（程序退出后自动删除，delete=False 表示我们手动删）
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8') as tmp:
-            for p in files:
-                tmp.write(p + '\n')      # 每行写一个文件路径
-            tmp_path = tmp.name            # 临时文件的完整路径
+        if not files:
+            return
 
+        # PowerShell 脚本：从 stdin 读取文件路径列表
+        # 使用 [Console]::In.ReadLine() 逐行读取，避免字符串拼接
+        # 显式设置输入编码为 UTF-8，防止中文路径在非 UTF-8 系统（如中文 Windows GBK）上乱码
+        script = """
+        [Console]::InputEncoding = [System.Text.Encoding]::UTF8
+        Add-Type -AssemblyName System.Windows.Forms
+        $fdo = New-Object System.Collections.Specialized.StringCollection
+        while (-not [Console]::In.EndOfStream) {
+            $line = [Console]::In.ReadLine()
+            if ($line) {
+                $fdo.Add($line)
+            }
+        }
+        if ($fdo.Count -gt 0) {
+            [System.Windows.Forms.Clipboard]::SetFileDropList($fdo)
+        }
+        """
+        
+        # 通过 stdin 传递文件路径，每行一个
+        file_list = "\n".join(files)
         try:
-            # PowerShell 里单引号包裹的路径，如果路径本身含单引号要转义成 ''
-            ps_path = tmp_path.replace("'", "''")
             result = subprocess.run(
-                ["powershell", "-NoProfile", "-Command",
-                 # Get-Content 读取临时文件（每行一个路径），
-                 # 然后 Set-Clipboard -Path 把这些路径对应的文件放入剪贴板
-                 f"$list = Get-Content -LiteralPath '{ps_path}'; Set-Clipboard -Path $list"],
-                capture_output=True, text=True,   # 捕获 stdout/stderr，方便检查错误
+                ["powershell", "-STA", "-NoProfile", "-Command", script],
+                input=file_list.encode("utf-8"),
+                capture_output=True,
+                timeout=30,                     # 和 macOS/Linux 一样加超时，防止卡死
             )
-            if result.returncode != 0:
-                raise RuntimeError(f"PowerShell执行失败: {result.stderr}")
-        finally:
-            # 无论成功失败，都要删除临时文件，避免残留
-            os.unlink(tmp_path)
+        except subprocess.TimeoutExpired:
+            raise RuntimeError("PowerShell 执行超时（30秒）")
+        if result.returncode != 0:
+            raise RuntimeError(f"PowerShell执行失败: {result.stderr}")
 
     # ════════════════════════════════════════════════════════════
     #  平台实现：macOS
@@ -149,10 +161,21 @@ class ClipboardMixin:
         macOS 的剪贴板操作需要通过 Finder 来完成，
         AppleScript 是 macOS 自带的脚本语言，可以控制 Finder。
         """
+        if not files:
+            return
+
         # 构造 AppleScript 需要的文件列表字符串
         # 每个文件路径写成 POSIX file "/path/to/file" 的格式，多个用逗号分隔
-        # 注意：路径中的双引号需要转义成 \"，避免破坏 AppleScript 语法
-        posix_files = ", ".join([f'POSIX file "{f.replace(chr(92), chr(92)+chr(92)).replace(chr(34), chr(92)+chr(34))}"' for f in files])
+        # 注意：需要转义路径中的特殊字符，避免破坏 AppleScript 语法
+        # 转义顺序很重要：先转义反斜杠，再转义其他字符
+        def escape_applescript(s):
+            return (s.replace(chr(92), chr(92)+chr(92))   # \ → \\
+                     .replace(chr(34), chr(92)+chr(34))   # " → \"
+                     .replace(chr(10), chr(92)+chr(110))  # 换行 → \n
+                     .replace(chr(13), chr(92)+chr(114))  # 回车 → \r
+                     .replace(chr(9), chr(92)+chr(116)))  # 制表 → \t
+        
+        posix_files = ", ".join([f'POSIX file "{escape_applescript(f)}"' for f in files])
         # AppleScript 脚本正文
         script = f'''
         tell application "Finder"
@@ -183,6 +206,9 @@ class ClipboardMixin:
         内容类型为 text/uri-list。
         xclip 是一个命令行工具，可以往 X11 剪贴板里写内容。
         """
+        if not files:
+            return
+
         try:
             # 构造 file:// URI 列表（每行一个）
             # 使用 urllib.parse.quote 对路径进行百分号编码，处理空格、中文、#、? 等特殊字符

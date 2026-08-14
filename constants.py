@@ -29,6 +29,30 @@ TEXT_PREVIEW_EXTS = {
     '.rtf', '.properties', '.gradle', '.dockerfile', '.editorconfig',
 }
 
+# ─── 文件冲突类型描述（冲突检测和对话框共用，避免到处硬编码字符串） ───
+CONFLICT_TARGET_EXISTS = "目标文件夹中已存在同名文件"
+CONFLICT_SOURCE_DUP = "选中的源文件之间存在同名"
+
+
+# ─── UI 配色与字体（浅色现代风 + 蓝色点缀） ───
+# 集中定义的好处：想换主题色只改这里，全界面生效
+class UI:
+    BG = "#f1f5f9"            # 窗口底色：很浅的蓝灰（slate-100）
+    CARD = "#ffffff"          # 卡片底色：纯白
+    ACCENT = "#2563eb"        # 点缀色：蓝（blue-600）
+    ACCENT_HOVER = "#1d4ed8"  # 按钮悬停：更深的蓝（blue-700）
+    ACCENT_LIGHT = "#eff6ff"  # 浅蓝底（blue-50），用于标题条等
+    TEXT = "#0f172a"          # 主文字：近黑（slate-900）
+    TEXT_DIM = "#64748b"      # 次要文字：灰蓝（slate-500）
+    BORDER = "#e2e8f0"        # 边框：浅灰（slate-200）
+    DANGER = "#dc2626"        # 危险操作：红（覆盖按钮）
+    DANGER_HOVER = "#b91c1c"
+
+    FONT = "Microsoft YaHei UI"      # 全局字体：微软雅黑
+    FONT_MONO = "Consolas"           # 等宽字体：预览代码用
+
+
+
 # ─── 常用文件类型（筛选快捷键用） ───
 # 点击界面上的"常用类型"按钮时，只有这些扩展名会被勾选
 COMMON_TYPES = {
@@ -40,7 +64,7 @@ COMMON_TYPES = {
 }
 
 
-def _fmt_size(size):
+def fmt_size(size):
     """把字节数格式化成人类可读的大小，例如 1048576 → '1.0 MB'
 
     原理：不断除以 1024，直到数值 < 1024，同时更换单位。

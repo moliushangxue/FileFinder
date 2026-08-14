@@ -84,7 +84,10 @@ class ToolTip:
             self.tip_window = None
 
 # 导入项目的其他模块
-from constants import COMMON_TYPES, compile_regex_patterns, match_file  # 常用文件类型集合、正则工具、文件匹配函数
+from constants import (
+    COMMON_TYPES, compile_regex_patterns, match_file,
+    CONFLICT_TARGET_EXISTS, CONFLICT_SOURCE_DUP,
+)
 from conflict_dialog import ConflictDialog        # 冲突处理对话框
 from preview_mixin import PreviewMixin            # 文件预览功能
 from clipboard_mixin import ClipboardMixin        # 剪贴板功能
@@ -114,10 +117,9 @@ class FileManagerApp(PreviewMixin, ClipboardMixin):
         #修改变量值会自动更新界面，反之亦然。
         self.folder_path = tk.StringVar()              # 源文件夹路径
         self.target_folder = tk.StringVar()            # 目标文件夹路径
-        self.file_extensions = []                       # 用户选中的扩展名列表
         self.all_extensions = set()                     # 扫描到的所有扩展名（集合）
         self.found_files = []                           # 扫描到的完整文件路径列表
-        self.selected_files = []                        # 用户选中的文件列表
+        self._scan_generation = 0                       # 扫描代际标记：防止过期线程覆盖新结果
         self.recursive_var = tk.BooleanVar(value=False) # 是否递归搜索（默认不递归）
         self.regex_var = tk.BooleanVar(value=False)     # 是否使用正则表达式搜索（默认不使用）
 
@@ -208,7 +210,8 @@ class FileManagerApp(PreviewMixin, ClipboardMixin):
         # 扫描按钮和清空按钮（放在关键词框右侧）
         btn_col_frame = ttk.Frame(keyword_frame)
         btn_col_frame.grid(row=1, column=2, padx=5, sticky=tk.N)
-        ttk.Button(btn_col_frame, text="扫描文件", command=self.scan_files).pack(pady=(0, 3))
+        self.scan_button = ttk.Button(btn_col_frame, text="扫描文件", command=self.scan_files)
+        self.scan_button.pack(pady=(0, 3))
         ttk.Button(btn_col_frame, text="清空关键词", command=self.clear_keywords).pack()
 
         # 文件类型筛选按钮（全选/全不选/常用类型）
@@ -391,9 +394,10 @@ class FileManagerApp(PreviewMixin, ClipboardMixin):
         keywords = [kw.strip() for kw in keyword_text.split('\n') if kw.strip()] if keyword_text else []
 
         # 获取选中的扩展名：遍历 extension_checkboxes 字典，找出被勾选的
-        selected_extensions = [
+        # 用集合（set）存储：match_file 里做 "in" 判断时是 O(1)，比列表快
+        selected_extensions = {
             ext for ext, var in self.extension_checkboxes.items() if var.get()
-        ]
+        }
 
         recursive = self.recursive_var.get()
         use_regex = self.regex_var.get()
@@ -408,18 +412,25 @@ class FileManagerApp(PreviewMixin, ClipboardMixin):
                 return
 
         self.status_var.set("正在扫描文件...")
+        self.scan_button.config(state=tk.DISABLED)  # 扫描期间禁用按钮，防止重复点击
+        self._scan_generation += 1                  # 代际+1：旧线程的结果会被丢弃
+        generation = self._scan_generation
 
         # ── 子线程：执行耗时的文件遍历 ──
         def _scan_thread():
-            found = []       # 存放匹配的文件完整路径
-            error_msg = None # 如果扫描出错，记录错误信息
+            found = []              # 存放匹配的文件完整路径
+            extensions_found = set()  # 收集所有出现的扩展名（避免主线程重复遍历）
+            error_msg = None        # 如果扫描出错，记录错误信息
             try:
                 if recursive:
                     # 递归模式：os.walk 会遍历所有子文件夹
-                    # 每次循环返回 (当前目录路径, 子目录列表, 文件名列表)
                     for dirpath, dirnames, filenames in os.walk(source_folder):
                         for fname in filenames:
                             full_path = os.path.join(dirpath, fname)
+                            _, ext = os.path.splitext(fname)
+                            ext = ext.lower()
+                            if ext:
+                                extensions_found.add(ext)
                             if match_file(fname, keywords, selected_extensions, regex_patterns):
                                 found.append(full_path)
                 else:
@@ -428,16 +439,20 @@ class FileManagerApp(PreviewMixin, ClipboardMixin):
                         full_path = os.path.join(source_folder, item)
                         if not os.path.isfile(full_path):
                             continue  # 跳过子文件夹，只处理文件
+                        _, ext = os.path.splitext(item)
+                        ext = ext.lower()
+                        if ext:
+                            extensions_found.add(ext)
                         if match_file(item, keywords, selected_extensions, regex_patterns):
                             found.append(full_path)
             except Exception as e:
-                # 获取完整的错误堆栈信息，方便调试
                 error_msg = f"{str(e)}\n{traceback.format_exc()}"
 
             # ── 回到主线程更新 UI ──
-            # tkinter 不允许在子线程里操作界面，所以用 root.after(0, 回调函数)
-            # 意思是"尽快在主线程里执行这个函数"
             def _update_ui():
+                self.scan_button.config(state=tk.NORMAL)  # 恢复扫描按钮
+                if generation != self._scan_generation:
+                    return  # 已有更新的扫描在进行/完成，丢弃这份过期结果
                 if error_msg:
                     messagebox.showerror("错误", f"扫描文件时出错: {error_msg}")
                     self.status_var.set("扫描失败")
@@ -445,46 +460,14 @@ class FileManagerApp(PreviewMixin, ClipboardMixin):
 
                 self.found_files = found              # 保存扫描结果
                 self.update_file_list()               # 更新文件列表控件
-                self.collect_extensions(source_folder, recursive)  # 重新收集扩展名
+                self.all_extensions = extensions_found  # 用子线程收集的扩展名（避免主线程再次遍历）
+                self.create_extension_checkboxes()     # 在主线程创建复选框控件
                 self.status_var.set(f"找到 {len(self.found_files)} 个文件" + ("（递归）" if recursive else ""))
 
             self.root.after(0, _update_ui)  # 调度到主线程执行
 
         # 启动子线程（daemon=True 表示主程序退出时自动结束此线程）
         threading.Thread(target=_scan_thread, daemon=True).start()
-
-    # ════════════════════════════════════════════════════════════
-    #  收集扩展名：扫描文件夹后更新扩展名复选框
-    # ════════════════════════════════════════════════════════════
-
-    def collect_extensions(self, folder, recursive=False):
-        """扫描文件夹，收集所有出现过的文件扩展名
-
-        每次扫描都会重新收集（之前是只有首次扫描才收集，导致换文件夹后扩展名不刷新）。
-        收集完后调用 create_extension_checkboxes() 更新界面上的复选框。
-        """
-        self.all_extensions.clear()  # 清空旧数据
-
-        if recursive:
-            # 递归模式：遍历所有子文件夹
-            for dirpath, _, filenames in os.walk(folder):
-                for fname in filenames:
-                    _, ext = os.path.splitext(fname)
-                    ext = ext.lower()
-                    if ext:  # 没有扩展名的文件跳过
-                        self.all_extensions.add(ext)
-        else:
-            # 非递归模式：只看源文件夹这一层
-            for item in os.listdir(folder):
-                full_path = os.path.join(folder, item)
-                if os.path.isfile(full_path):  # 只处理文件，跳过子文件夹
-                    _, ext = os.path.splitext(item)
-                    ext = ext.lower()
-                    if ext:
-                        self.all_extensions.add(ext)
-
-        # 根据收集到的扩展名，创建界面上的复选框
-        self.create_extension_checkboxes()
 
     def create_extension_checkboxes(self):
         """根据收集到的扩展名，创建横向排列的复选框
@@ -541,8 +524,8 @@ class FileManagerApp(PreviewMixin, ClipboardMixin):
         self.file_listbox.delete(0, tk.END)   # 清空列表
         self._clear_preview()                   # 清空预览（来自 PreviewMixin）
 
+        source = self.folder_path.get()         # 循环外只取一次，不用每个文件都读变量
         for file_path in self.found_files:
-            source = self.folder_path.get()
             try:
                 # 计算相对于源文件夹的路径，如 "sub/photo.jpg"
                 display = os.path.relpath(file_path, source)
@@ -581,7 +564,7 @@ class FileManagerApp(PreviewMixin, ClipboardMixin):
         if not sel:
             self._clear_preview()
             return
-        idx = sel[0]                            # 取第一个选中行
+        idx = sel[-1]                            # 取最后点击的行（多选时更符合直觉）
         if idx < len(self.found_files):
             self._preview_file(self.found_files[idx])  # _preview_file 来自 PreviewMixin
 
@@ -646,9 +629,9 @@ class FileManagerApp(PreviewMixin, ClipboardMixin):
                 # 有冲突：目标已有同名文件，或多个源文件同名
                 for src_path, _ in items:
                     if target_exists:
-                        conflict_type = "目标文件夹中已存在同名文件"
+                        conflict_type = CONFLICT_TARGET_EXISTS
                     else:
-                        conflict_type = "选中的源文件之间存在同名"
+                        conflict_type = CONFLICT_SOURCE_DUP
                     conflicts.append((fname, src_path, dest_path, conflict_type))
             else:
                 # 无冲突
@@ -704,6 +687,12 @@ class FileManagerApp(PreviewMixin, ClipboardMixin):
                     continue                              # 跳过，不处理
                 elif decision == "rename":
                     dest_path = self._unique_dest(dest_path, used_dest_paths)  # 重命名
+                elif decision == "overwrite" and dest_path in used_dest_paths:
+                    # 关键保护：目标路径已被本批次的前一个文件占用
+                    # （说明这是"源文件之间同名"的冲突），
+                    # 此时再覆盖会把前一个文件的内容冲掉（move 时等于数据丢失），
+                    # 所以强制改为重命名。
+                    dest_path = self._unique_dest(dest_path, used_dest_paths)
 
             # 无冲突文件也要检查：前面可能已有同名文件占了目标路径
             elif dest_path in used_dest_paths:
@@ -766,8 +755,14 @@ class FileManagerApp(PreviewMixin, ClipboardMixin):
 
         base, ext = os.path.splitext(dest_path)  # 分离 "D:\target\file" 和 ".txt"
         counter = 1
+        max_attempts = 10000
         # 循环直到找到一个不存在的路径
         while os.path.exists(dest_path) or dest_path in used_paths:
+            if counter > max_attempts:
+                raise RuntimeError(
+                    f"无法为 '{os.path.basename(dest_path)}' 生成不冲突的文件名"
+                    f"（已尝试 {max_attempts} 次）"
+                )
             dest_path = f"{base}({counter}){ext}"  # file(1).txt, file(2).txt ...
             counter += 1
         return dest_path
