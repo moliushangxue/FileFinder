@@ -7,8 +7,10 @@ FileFinder - 全局常量与公共工具函数
 把常量集中在一个地方的好处是：改一个地方，全项目都生效，不用到处找。
 """
 
-import os   # 文件路径操作
-import re   # 正则表达式支持
+import json   # 配置文件读写
+import os     # 文件路径操作
+import re     # 正则表达式支持
+import sys    # 平台判断（配置目录位置）
 
 # ─── 文本文件预览的最大字节数 ───
 # 超过这个大小的文本文件，预览时只显示前面一部分，避免加载太慢
@@ -131,3 +133,53 @@ def match_file(filename, keywords, selected_extensions, regex_patterns=None):
                 return False
 
     return True
+
+
+# ─── 启动提示配置（"不再提示"标记持久化） ───
+# 存到用户配置目录而不是程序目录：打包成 exe 后程序目录可能没有写权限
+
+def get_config_dir():
+    """返回应用配置目录（跨平台）
+
+    Windows: %LOCALAPPDATA%\\FileFinder（无 LOCALAPPDATA 时退回用户主目录）
+    macOS:   ~/Library/Application Support/FileFinder
+    Linux:   $XDG_CONFIG_HOME/FileFinder 或 ~/.config/FileFinder
+    """
+    home = os.path.expanduser("~")
+    if sys.platform == "win32":
+        base = os.environ.get("LOCALAPPDATA") or home
+    elif sys.platform == "darwin":
+        base = os.path.join(home, "Library", "Application Support")
+    else:
+        base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(home, ".config")
+    return os.path.join(base, "FileFinder")
+
+
+def should_show_disclaimer():
+    """是否需要显示启动风险提示弹窗
+
+    返回 False 的条件：配置文件里已有 "disclaimer_agreed": true
+    （用户之前勾选过"不再提示"并点了确定）
+    """
+    cfg = os.path.join(get_config_dir(), "config.json")
+    try:
+        with open(cfg, "r", encoding="utf-8") as f:
+            return not json.load(f).get("disclaimer_agreed", False)
+    except (OSError, ValueError):
+        return True   # 读不到配置 = 从未同意过，需要弹窗
+
+
+def save_disclaimer_agreed():
+    """记录用户勾选"不再提示"，以后启动不再弹提示"""
+    config_dir = get_config_dir()
+    os.makedirs(config_dir, exist_ok=True)
+    cfg = os.path.join(config_dir, "config.json")
+    data = {}
+    try:
+        with open(cfg, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        pass
+    data["disclaimer_agreed"] = True
+    with open(cfg, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)

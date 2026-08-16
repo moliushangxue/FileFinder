@@ -43,10 +43,12 @@ from constants import (
     UI,
     COMMON_TYPES, compile_regex_patterns, match_file,
     CONFLICT_TARGET_EXISTS, CONFLICT_SOURCE_DUP,
+    should_show_disclaimer, save_disclaimer_agreed,
 )
 from conflict_dialog import ConflictDialog        # 冲突处理对话框
 from preview_mixin import PreviewMixin            # 文件预览功能
 from clipboard_mixin import ClipboardMixin        # 剪贴板功能
+from disclaimer_dialog import DisclaimerDialog    # 启动风险提示弹窗
 
 
 class ToolTip:
@@ -929,13 +931,33 @@ class FileManagerApp(PreviewMixin, ClipboardMixin):
 # ════════════════════════════════════════════════════════════
 
 def main():
-    """程序入口：创建主窗口，启动事件循环"""
+    """程序入口：先展示风险提示，同意后才创建主窗口，启动事件循环"""
     # customtkinter 全局设置：浅色模式 + 蓝色主题
     ctk.set_appearance_mode("light")
     ctk.set_default_color_theme("blue")
 
     root = ctk.CTk()                         # 创建 CTk 主窗口（底层仍是 tkinter）
+
+    # 先"透明隐藏"主窗口而不是 withdraw()：customtkinter 的 CTkToplevel
+    # 在父窗口 withdrawn 状态下不会渲染，弹窗会因此显示不出来。
+    # 用透明度隐藏则不影响子窗口（弹窗）显示。
+    try:
+        root.attributes("-alpha", 0.0)       # 主窗口隐藏，弹窗正常显示
+    except tk.TclError:
+        pass                                 # 个别平台不支持透明度，则让主窗口直接显示
+
+    # 首次使用（或未勾选"不再提示"）时弹出风险提示，必须同意才能继续
+    if should_show_disclaimer():
+        dlg = DisclaimerDialog(root)
+        root.wait_window(dlg)                # 模态等待弹窗关闭
+        if not dlg.agreed:
+            root.destroy()                   # 用户拒绝或直接关窗 → 退出程序
+            return
+        if dlg.dont_ask_again:
+            save_disclaimer_agreed()         # 记录"不再提示"，以后启动不再弹出
+
     app = FileManagerApp(root)               # 创建应用实例（构建界面）
+    root.attributes("-alpha", 1.0)           # 显示主窗口
     root.mainloop()                          # 启动事件循环（程序开始响应用户操作）
 
 

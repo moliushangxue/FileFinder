@@ -32,6 +32,12 @@ MANIFEST
 *.manifest
 *.spec
 
+# IDE / 工具杂项
+.workbuddy/
+
+# 临时截图
+ui_preview_v22.png
+
 # Installer logs
 pip-log.txt
 pip-delete-this-directory.txt
