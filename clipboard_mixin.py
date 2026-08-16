@@ -15,11 +15,29 @@ Mixin 模式：把"剪贴板相关功能"从主类里拆出来，单独放一个
   - Linux：用 xclip 工具，往 clipboard 写入 file:// 格式的 URI
 """
 
+import base64
 import platform
 import subprocess
 import urllib.parse
 
 from tkinter import messagebox
+
+
+def copy_files_to_clipboard_platform(files):
+    """把文件列表复制到系统剪贴板（跨平台分发，供 Mixin 与打包对话框共用）
+
+    参数:
+        files: 要复制的文件路径列表
+    异常:
+        平台复制失败时抛出 RuntimeError
+    """
+    system = platform.system()          # 获取操作系统名称
+    if system == "Windows":
+        ClipboardMixin._copy_files_windows(files)
+    elif system == "Darwin":            # macOS 的内核名是 Darwin
+        ClipboardMixin._copy_files_macos(files)
+    else:                               # Linux 等其他系统
+        ClipboardMixin._copy_files_linux(files)
 
 
 class ClipboardMixin:
@@ -81,14 +99,7 @@ class ClipboardMixin:
         selected_files = [self.found_files[i] for i in selected_indices]
 
         try:
-            system = platform.system()    # 获取操作系统名称
-            if system == "Windows":
-                self._copy_files_windows(selected_files)
-            elif system == "Darwin":       # macOS 的内核名是 Darwin
-                self._copy_files_macos(selected_files)
-            else:                          # Linux 等其他系统
-                self._copy_files_linux(selected_files)
-
+            copy_files_to_clipboard_platform(selected_files)
             self.status_var.set(f"已复制 {len(selected_files)} 个文件到剪贴板")
             messagebox.showinfo(
                 "成功",
@@ -112,43 +123,45 @@ class ClipboardMixin:
         注意：必须使用 -STA 参数启动 PowerShell，因为 System.Windows.Forms.Clipboard
         是 Windows Forms API，必须在单线程公寓（STA）模式下运行。
 
-        安全说明：通过 stdin 传递文件列表（每行一个路径），避免字符串拼接，
-        彻底消除命令注入风险。
+        安全说明：脚本用 -EncodedCommand（base64）整体传递，路径内嵌在脚本数组里，
+        任何特殊字符都不会被当成命令执行，彻底消除注入风险。
         """
         if not files:
             return
 
-        # PowerShell 脚本：从 stdin 读取文件路径列表
-        # 使用 [Console]::In.ReadLine() 逐行读取，避免字符串拼接
-        # 显式设置输入编码为 UTF-8，防止中文路径在非 UTF-8 系统（如中文 Windows GBK）上乱码
-        script = """
-        [Console]::InputEncoding = [System.Text.Encoding]::UTF8
-        Add-Type -AssemblyName System.Windows.Forms
-        $fdo = New-Object System.Collections.Specialized.StringCollection
-        while (-not [Console]::In.EndOfStream) {
-            $line = [Console]::In.ReadLine()
-            if ($line) {
-                $fdo.Add($line)
-            }
-        }
-        if ($fdo.Count -gt 0) {
-            [System.Windows.Forms.Clipboard]::SetFileDropList($fdo)
-        }
-        """
-        
-        # 通过 stdin 传递文件路径，每行一个
-        file_list = "\n".join(files)
+        # 文件路径写成 PowerShell 单引号字符串数组（单引号用 '' 转义）
+        # 不使用 stdin 传数据：PowerShell 5.1 的 [Console]::In 在 -Command 模式
+        # 绑定的是控制台输入而不是管道，重定向 stdin 会一直等待导致 30 秒超时
+        items = ", ".join("'" + p.replace("'", "''") + "'" for p in files)
+        script = (
+            "Add-Type -AssemblyName System.Windows.Forms;"
+            "$fdo = New-Object System.Collections.Specialized.StringCollection;"
+            f"$paths = @({items});"
+            "foreach ($p in $paths) { if ($p) { [void]$fdo.Add($p) } };"
+            # 剪贴板可能被其他程序短暂占用（如复制大文件时），失败后重试 10 次
+            "if ($fdo.Count -gt 0) {"
+            "  $ok = $false;"
+            "  for ($i = 0; $i -lt 10 -and -not $ok; $i++) {"
+            "    try { [System.Windows.Forms.Clipboard]::SetFileDropList($fdo); $ok = $true }"
+            "    catch { Start-Sleep -Milliseconds 200 }"
+            "  }"
+            "  if (-not $ok) { throw '剪贴板被占用，操作失败' }"
+            "}"
+        )
+        # -EncodedCommand：把 UTF-16LE 编码的脚本转 base64，PowerShell 解码后执行
+        encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
         try:
             result = subprocess.run(
-                ["powershell", "-STA", "-NoProfile", "-Command", script],
-                input=file_list.encode("utf-8"),
+                ["powershell", "-STA", "-NoProfile", "-EncodedCommand", encoded],
                 capture_output=True,
                 timeout=30,                     # 和 macOS/Linux 一样加超时，防止卡死
             )
         except subprocess.TimeoutExpired:
             raise RuntimeError("PowerShell 执行超时（30秒）")
         if result.returncode != 0:
-            raise RuntimeError(f"PowerShell执行失败: {result.stderr}")
+            raise RuntimeError(
+                "PowerShell执行失败: " + result.stderr.decode("utf-8", "replace")
+            )
 
     # ════════════════════════════════════════════════════════════
     #  平台实现：macOS

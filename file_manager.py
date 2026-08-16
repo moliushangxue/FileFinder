@@ -112,6 +112,7 @@ from constants import (
 from conflict_dialog import ConflictDialog        # 冲突处理对话框
 from preview_mixin import PreviewMixin            # 文件预览功能
 from clipboard_mixin import ClipboardMixin        # 剪贴板功能
+from pack_dialog import PackDialog                # 打包到 ZIP 对话框
 
 
 class FileManagerApp(PreviewMixin, ClipboardMixin):
@@ -385,23 +386,8 @@ class FileManagerApp(PreviewMixin, ClipboardMixin):
         self.file_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.configure(command=self.file_listbox.yview)
 
-        # 文件选择按钮（全选/全不选/反选）
-        sel_row = ctk.CTkFrame(list_card, fg_color="transparent")
-        sel_row.pack(fill=tk.X, padx=12, pady=(0, 4))
-        self._make_button(sel_row, "全选", self.select_all_files,
-                          style="ghost", width=64, height=26).pack(side=tk.LEFT, padx=(0, 4))
-        self._make_button(sel_row, "全不选", self.deselect_all_files,
-                          style="ghost", width=64, height=26).pack(side=tk.LEFT, padx=(0, 4))
-        self._make_button(sel_row, "反选", self.invert_selection,
-                          style="ghost", width=64, height=26).pack(side=tk.LEFT)
-
-        # 剪贴板操作按钮（这两个方法来自 ClipboardMixin）
-        clip_row = ctk.CTkFrame(list_card, fg_color="transparent")
-        clip_row.pack(fill=tk.X, padx=12, pady=(0, 10))
-        self._make_button(clip_row, "复制路径到剪贴板", self.copy_paths_to_clipboard,
-                          style="outline", height=28).pack(side=tk.LEFT, padx=(0, 6))
-        self._make_button(clip_row, "复制文件到剪贴板", self.copy_files_to_clipboard,
-                          style="outline", height=28).pack(side=tk.LEFT)
+        # 注：全选/全不选/反选 和 剪贴板按钮已移到底部"文件操作"卡片，
+        # 保证小窗口时也始终可见（列表卡片底部会被可伸缩区挤出）
 
         # --- 右侧：文件预览卡片 ---
         preview_card = self._card(content)
@@ -456,6 +442,27 @@ class FileManagerApp(PreviewMixin, ClipboardMixin):
             font=(UI.FONT, 12, "bold"), height=34, width=150,
             fg_color=UI.ACCENT, hover_color=UI.ACCENT_HOVER,
         ).pack(side=tk.LEFT)
+        # 打包按钮：与复制/剪切分开（右侧），outline 风格弱化视觉、不抢主操作
+        self._make_button(
+            op_row, "打包到 ZIP", self.open_pack_dialog,
+            style="outline", width=150, height=34,
+        ).pack(side=tk.RIGHT)
+
+        # 辅助操作行：全选/全不选/反选（左）+ 剪贴板（右）
+        # 放在底部卡片里，任何窗口大小都可见
+        aux_row = ctk.CTkFrame(action_card, fg_color="transparent")
+        aux_row.pack(fill=tk.X, padx=12, pady=(0, 10))
+        self._make_button(aux_row, "全选", self.select_all_files,
+                          style="ghost", width=64, height=28).pack(side=tk.LEFT, padx=(0, 4))
+        self._make_button(aux_row, "全不选", self.deselect_all_files,
+                          style="ghost", width=64, height=28).pack(side=tk.LEFT, padx=(0, 4))
+        self._make_button(aux_row, "反选", self.invert_selection,
+                          style="ghost", width=64, height=28).pack(side=tk.LEFT)
+        # 剪贴板操作按钮（这两个方法来自 ClipboardMixin）
+        self._make_button(aux_row, "复制路径到剪贴板", self.copy_paths_to_clipboard,
+                          style="outline", height=28).pack(side=tk.RIGHT, padx=(0, 6))
+        self._make_button(aux_row, "复制文件到剪贴板", self.copy_files_to_clipboard,
+                          style="outline", height=28).pack(side=tk.RIGHT)
 
         # ── 区域 3 的 content 现在才 pack ──
         # 此时顶部卡片（header/源文件夹/搜索）和底部卡片（操作）都已各就各位，
@@ -479,6 +486,26 @@ class FileManagerApp(PreviewMixin, ClipboardMixin):
         if folder:
             self.target_folder.set(folder)
             self.status_var.set(f"已选择目标文件夹: {folder}")
+
+    # ════════════════════════════════════════════════════════════
+    #  打包到 ZIP
+    # ════════════════════════════════════════════════════════════
+
+    def open_pack_dialog(self):
+        """打开"打包到 ZIP"对话框
+
+        默认打包内容 = 目标文件夹（保存位置也默认为目标文件夹，
+        打开即可直接打包）；未设置目标文件夹则不预填。
+        """
+        initial = []
+        tgt = self.target_folder.get()
+        if tgt and os.path.isdir(tgt):
+            initial.append(tgt)
+        PackDialog(
+            self.root,
+            initial_paths=initial,
+            target_folder=tgt,
+        )
 
     # ════════════════════════════════════════════════════════════
     #  扫描文件（支持递归 + 子线程，不卡 UI）
