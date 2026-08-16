@@ -10,6 +10,21 @@
 ### 计划添加
 - 添加撤销功能
 
+## [2.2.0] - 2026-08-15
+
+### ✨ 新功能
+- **🟡 界面全面重做（customtkinter）**：UI 框架从 tkinter.ttk 迁移到 customtkinter，全新浅色现代风 + 蓝色点缀
+  - 主界面改为 6 区卡片式布局，配色统一集中在 `constants.UI` 类，便于整体调整
+  - `ConflictDialog` 冲突对话框迁移到 `CTkToplevel`，"全部覆盖"按钮使用红色警示样式
+  - 预览区文本组件适配 customtkinter（`.config` → `.configure`）
+  - 适配高分屏 DPI 缩放（150% 等），窗口尺寸与位置按逻辑单位计算
+  - 逻辑层（扫描/筛选/文件操作/冲突处理）与 v2.1 完全一致，仅替换 UI 层
+- **启动脚本锁定 Python 3.11**：`启动文件管理工具.bat` 优先使用 `py -3.11` 启动，解决多版本 Python 共存时解析到未安装 customtkinter 的解释器（如微软商店版 3.10）导致启动失败的问题
+
+### 🏗️ 依赖变更
+- 新增第三方依赖：`customtkinter`（≥ 6.0.0，随其安装 `pillow`）
+- 最低 Python 版本要求从 3.6 提升至 **3.11**（customtkinter 运行所需）
+
 ## [2.1.0] - 2026-05-22
 
 ### ✨ 新功能
@@ -21,7 +36,7 @@
   - 鼠标悬浮提示：将鼠标放在"正则表达式"复选框上，会弹出通俗易懂的功能解释，不了解正则的用户也能看懂
 
 ### 🔒 安全修复
-- **🔴 修复 Windows 剪贴板命令注入漏洞**：`_copy_files_windows` 原先使用 f-string 拼接文件名到 PowerShell 命令，文件名含特殊字符（如 `'`、`$()`、`` ` ``）可被注入执行任意命令。现改用临时文件中转 + `Get-Content -LiteralPath` 安全读取，彻底消除注入风险
+- **🔴 修复 Windows 剪贴板命令注入漏洞**：`_copy_files_windows` 原先使用 f-string 拼接文件名到 PowerShell 命令，文件名含特殊字符（如 `'`、`$()`、`` ` ``）可被注入执行任意命令。现改用 stdin 传递文件列表，配合 PowerShell `[Console]::In.ReadLine()` 逐行安全读取，彻底消除注入风险
 - **macOS AppleScript 注入**：对文件路径中的双引号进行转义（`"` → `\"`），防止破坏 AppleScript 语法
 - **Linux URI 特殊字符**：使用 `urllib.parse.quote` 对文件路径进行百分号编码，正确处理空格、中文、`#`、`?` 等特殊字符
 
@@ -52,6 +67,13 @@
 - **🟢 顶层导入 zipfile / xml.etree.ElementTree**：原在函数内部导入，现移至文件顶部（`preview_mixin.py`）
 - **🟢 修复 TEXT_PREVIEW_EXTS 语法错误**：集合定义行首多余冒号已移除
 - **🟢 移除冗余的"直接移动"按钮**：与"剪切到目标文件夹"功能完全重复，已移除
+
+### 🐛 修复
+- **🔴 覆盖冲突数据丢失**：`perform_action` 中 `decision=="overwrite"` 时未检查 `used_dest_paths`。源文件之间同名（如 `A/a.txt` 与 `B/a.txt`）选择"全部覆盖"时，后处理的文件会覆盖先处理的结果导致数据丢失。修复：目标路径已被本批次占用时强制重命名
+- **🔴 xlsx 预览显示索引数字**：sheet XML 中字符串单元格存储的是 sharedStrings 索引，旧代码直接显示索引数字。修复：新增 `_extract_xlsx_text`，解析 sharedStrings.xml 映射回真实文本，sheet 按数字排序
+- **扫描并发防护**：`_scan_generation` 代际标记丢弃过期扫描线程的结果，扫描期间禁用扫描按钮
+- 冲突类型字符串抽为 `constants.py` 常量 `CONFLICT_TARGET_EXISTS` / `CONFLICT_SOURCE_DUP`
+- 清理无用属性（`file_extensions` / `selected_files`）与无用导入，扩展名筛选改用 set 提升性能
 
 ## [2.0.0] - 2026-05-03
 

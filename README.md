@@ -5,7 +5,7 @@
 一个简单易用的批量文件筛选和操作工具，支持按文件名关键词搜索、按文件类型筛选，并提供复制/剪切/移动功能。
 
 ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-blue)
-![Python](https://img.shields.io/badge/python-3.6+-green)
+![Python](https://img.shields.io/badge/python-3.11+-green)
 ![License](https://img.shields.io/badge/license-MIT-yellow)
 
 ## 功能特点
@@ -20,7 +20,7 @@
   - 图片/音视频/压缩包等显示文件信息
 - **文件冲突处理**: 复制/移动时自动检测同名文件冲突，支持覆盖/重命名/跳过
 - **灵活选择**: 支持全选、全不选、反选等多种文件选择方式
-- **多种操作**: 支持复制、剪切、直接移动到目标文件夹
+- **多种操作**: 支持复制、剪切到目标文件夹
 - **剪贴板操作**: 
   - 复制文件路径到剪贴板（文本格式）
   - 复制文件本体到剪贴板（可在其他位置粘贴文件）
@@ -60,8 +60,12 @@
 
 ### 安装要求
 
-- Python 3.6 或更高版本
-- tkinter（通常随 Python 一起安装）
+- Python 3.11 或更高版本
+- customtkinter（v2.2 起界面基于 customtkinter 构建）
+
+```bash
+py -3.11 -m pip install customtkinter
+```
 
 ### 使用方法
 
@@ -83,7 +87,7 @@ cd FileFinder
 
 **方式二：命令行启动**
 ```bash
-python file_manager.py
+py -3.11 file_manager.py
 ```
 
 #### 3. 使用步骤
@@ -120,7 +124,6 @@ python file_manager.py
 9. **执行操作**: 根据需要点击以下按钮之一：
    - **复制到目标文件夹**: 复制选中文件到目标位置（保留原文件）
    - **剪切到目标文件夹**: 移动选中文件到目标位置（删除原文件）
-   - **直接移动**: 同剪切功能
 
 ### 文件冲突处理
 
@@ -214,8 +217,8 @@ A: 这些是二进制格式，无法直接提取文本。建议转换为 .docx/.
 
 ## 系统要求
 
-- **Python**: 3.6 或更高版本
-- **tkinter**: 通常随 Python 一起安装
+- **Python**: 3.11 或更高版本
+- **customtkinter**: 通过 pip 安装（`pip install customtkinter`，随其安装 pillow）
 - **操作系统**:
   - Windows 7 或更高版本
   - macOS 10.10 或更高版本
@@ -231,8 +234,11 @@ A: 这些是二进制格式，无法直接提取文本。建议转换为 .docx/.
 git clone https://github.com/moliushangxue/FileFinder.git
 cd FileFinder
 
+# 安装依赖
+py -3.11 -m pip install customtkinter
+
 # 运行程序
-python file_manager.py
+py -3.11 file_manager.py
 ```
 
 ## 许可证
