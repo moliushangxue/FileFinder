@@ -10,6 +10,12 @@
 ### 计划添加
 - 添加撤销功能
 
+### ⚡ 改进
+- **🟢 Windows 剪贴板复制文件改用原生 API**：原方案通过 PowerShell 调用 .NET 的 `System.Windows.Forms.Clipboard.SetFileDropList`，360 等安全软件会将 PowerShell 进程启动拦截并报“线程注入”。新方案优先用 pywin32 在进程内直接构造 CF_HDROP 格式数据写入剪贴板（`win32clipboard` + `struct.pack`，剪贴板被占用时自动重试 10 次）——pywin32 已安装时不再启动任何外部进程，消除安全软件误报；未安装时回退到 PowerShell 方案（回退方案同时增加 `CREATE_NO_WINDOW` 标志隐藏控制台窗口）
+
+### 🏗️ 依赖变更
+- 新增可选依赖：`pywin32`（Windows 平台推荐安装，启用原生剪贴板 API；未安装时回退 PowerShell 方案）
+
 ## [2.4.0] - 2026-08-16
 
 ### ✨ 新功能

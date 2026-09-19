@@ -64,9 +64,12 @@
 
 - Python 3.11 或更高版本
 - customtkinter（v2.2 起界面基于 customtkinter 构建）
+- pywin32（Windows 推荐安装：使用原生 API 复制文件到剪贴板，避免 360 等安全软件误报）
 
 ```bash
 py -3.11 -m pip install customtkinter
+# Windows 推荐同时安装 pywin32（原生剪贴板 API，避免安全软件拦截）
+py -3.11 -m pip install pywin32
 ```
 
 ### 使用方法
@@ -203,9 +206,12 @@ FileFinder 支持同时搜索多个关键词，非常适合批量查找文件：
 
 ### Q: 为什么复制文件到剪贴板后无法粘贴？
 A: 请确保：
-- Windows: PowerShell 可用（系统自带）
+- Windows: 已安装 pywin32（`py -3.11 -m pip install pywin32`，使用原生 API）；未安装时回退使用系统自带的 PowerShell
 - macOS: Finder 正常运行
 - Linux: 已安装 xclip (`sudo apt-get install xclip`)
+
+### Q: 360 等安全软件提示"线程注入"或拦截操作怎么办？
+A: 安装 pywin32 后，复制文件到剪贴板将直接在应用进程内调用原生 API（不再启动 PowerShell 子进程），不会触发安全软件拦截。执行 `py -3.11 -m pip install pywin32` 即可。
 
 ### Q: 搜索时区分大小写吗？
 A: 不区分，FileFinder 会忽略大小写进行搜索。
@@ -226,6 +232,7 @@ A: 这些是二进制格式，无法直接提取文本。建议转换为 .docx/.
 
 - **Python**: 3.11 或更高版本
 - **customtkinter**: 通过 pip 安装（`pip install customtkinter`，随其安装 pillow）
+- **pywin32**（Windows 可选，推荐）: 通过 pip 安装（`pip install pywin32`）；安装后复制文件到剪贴板使用原生 API，避免 360 等安全软件误报；未安装时回退到 PowerShell 方案
 - **操作系统**:
   - Windows 7 或更高版本
   - macOS 10.10 或更高版本
@@ -243,6 +250,8 @@ cd FileFinder
 
 # 安装依赖
 py -3.11 -m pip install customtkinter
+# Windows 推荐：pywin32（原生剪贴板 API，避免 360 等安全软件误报）
+py -3.11 -m pip install pywin32
 
 # 运行程序
 py -3.11 file_manager.py

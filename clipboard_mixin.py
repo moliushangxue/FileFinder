@@ -10,14 +10,17 @@ Mixin 模式：把"剪贴板相关功能"从主类里拆出来，单独放一个
 这样用户就可以在资源管理器里直接 Ctrl+V 粘贴文件了。
 
 支持三个平台：
-  - Windows：用 .NET 的 System.Windows.Forms.Clipboard.SetFileDropList
+  - Windows：用 pywin32 的 win32clipboard 直接写入 CF_HDROP 剪贴板数据
   - macOS：用 AppleScript 告诉 Finder 把文件放入剪贴板
   - Linux：用 xclip 工具，往 clipboard 写入 file:// 格式的 URI
 """
 
 import base64
+import os
 import platform
+import struct
 import subprocess
+import time
 import urllib.parse
 
 from tkinter import messagebox
@@ -40,6 +43,96 @@ def copy_files_to_clipboard_platform(files):
         ClipboardMixin._copy_files_linux(files)
 
 
+def _copy_files_windows_native(files):
+    """原生 Windows API 方案（需要 pywin32）：构造 CF_HDROP 格式数据写入剪贴板
+
+    Windows 复制文件到剪贴板的本质是：写入 CF_HDROP 格式的剪贴板数据。
+    CF_HDROP 的数据布局 = DROPFILES 结构体 + UTF-16LE 编码的路径列表（\0 分隔，末尾双 \0）。
+    粘贴时由系统负责实际的文件拷贝，和资源管理器里 Ctrl+C 的行为完全一致。
+    """
+    import win32clipboard
+
+    # 1. 路径规范化：转为绝对路径、统一反斜杠
+    abs_paths = []
+    for p in files:
+        p = os.path.abspath(p)
+        abs_paths.append(p.replace('/', '\\'))
+
+    # 2. 拼接路径字符串
+    #    CF_HDROP 规定列表必须以「两个」宽 NUL 结尾：一个结束最后一条路径，
+    #    一个结束整个列表。若只补一个 NUL，系统会越界继续解析缓冲区外的堆内存，
+    #    粘贴时可能冒出不存在的“垃圾文件”。
+    paths_joined = '\0'.join(abs_paths) + '\0\0'
+    paths_bytes = paths_joined.encode('utf-16-le')  # Windows 原生 UTF-16
+
+    # 3. 构造 DROPFILES 结构体（20 字节）
+    #    - pFiles: 从结构体起始到路径数据起始的偏移量 = sizeof(DROPFILES) = 20
+    #    - x, y: 拖放坐标（非拖放场景设为 0）
+    #    - fNC: 非客户区标志（设为 0）
+    #    - fWide: 非零 = 使用 Unicode（UTF-16），这是必须的，否则中文路径会乱码
+    dropfiles = struct.pack('<IiiII', 20, 0, 0, 0, 1)
+    data = dropfiles + paths_bytes
+
+    # 4. 写入剪贴板
+    #    剪贴板可能被其他程序短暂占用（如复制大文件、安全软件挂钩），
+    #    OpenClipboard 失败时重试 10 次（每次间隔 200ms）。
+    #    同时设置 "Preferred DropEffect" 格式 = 复制（1）。
+    #    没有这个附加格式时，部分程序粘贴时会使用默认行为（可能是剪切）。
+    last_error = None
+    for _ in range(10):
+        try:
+            win32clipboard.OpenClipboard()
+            try:
+                win32clipboard.EmptyClipboard()
+                win32clipboard.SetClipboardData(win32clipboard.CF_HDROP, data)
+                # RegisterClipboardFormat 返回自定义格式的 ID
+                cf_drop_effect = win32clipboard.RegisterClipboardFormat('Preferred DropEffect')
+                win32clipboard.SetClipboardData(cf_drop_effect, struct.pack('<I', 1))
+            finally:
+                win32clipboard.CloseClipboard()
+            return  # 写入成功
+        except Exception as e:
+            last_error = e
+            time.sleep(0.2)
+    raise RuntimeError(f'剪贴板被占用，写入失败（已重试 10 次）：{last_error}') from last_error
+
+
+def _copy_files_windows_powershell(files):
+    """PowerShell 回退方案：使用 .NET 的 FileDrop 格式复制文件到剪贴板
+
+    仅在 pywin32 未安装时使用。部分安全软件可能拦截 PowerShell 启动。
+    """
+    items = ", ".join("'" + p.replace("'", "''") + "'" for p in files)
+    script = (
+        "Add-Type -AssemblyName System.Windows.Forms;"
+        "$fdo = New-Object System.Collections.Specialized.StringCollection;"
+        f"$paths = @({items});"
+        "foreach ($p in $paths) { if ($p) { [void]$fdo.Add($p) } };"
+        "if ($fdo.Count -gt 0) {"
+        "  $ok = $false;"
+        "  for ($i = 0; $i -lt 10 -and -not $ok; $i++) {"
+        "    try { [System.Windows.Forms.Clipboard]::SetFileDropList($fdo); $ok = $true }"
+        "    catch { Start-Sleep -Milliseconds 200 }"
+        "  }"
+        "  if (-not $ok) { throw '剪贴板被占用，操作失败' }"
+        "}"
+    )
+    encoded = base64.b64encode(script.encode('utf-16-le')).decode('ascii')
+    try:
+        result = subprocess.run(
+            ['powershell', '-STA', '-NoProfile', '-EncodedCommand', encoded],
+            capture_output=True,
+            timeout=30,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError('PowerShell 执行超时（30秒）')
+    if result.returncode != 0:
+        raise RuntimeError(
+            'PowerShell执行失败: ' + result.stderr.decode('utf-8', 'replace')
+        )
+
+
 class ClipboardMixin:
     """剪贴板操作混入类
 
@@ -55,9 +148,9 @@ class ClipboardMixin:
     # ════════════════════════════════════════════════════════════
 
     def copy_paths_to_clipboard(self):
-        """把选中文件的"路径文字"复制到剪贴板
+        """把选中文件的“路径文字”复制到剪贴板
 
-        注意：这里复制的是"文字"（比如 D:/xxx/a.txt），
+        注意：这里复制的是“文字”（比如 D:/xxx/a.txt），
         而不是文件本身。粘贴时会得到一段文字，不是文件。
         """
         selected_indices = self.file_listbox.curselection()
@@ -83,11 +176,11 @@ class ClipboardMixin:
     # ════════════════════════════════════════════════════════════
 
     def copy_files_to_clipboard(self):
-        """把选中的"文件本身"复制到系统剪贴板
+        """把选中的“文件本身”复制到系统剪贴板
 
         这个和上面的区别是：
-          上面 → 复制"文字"（路径），粘贴得到文字
-          这个 → 复制"文件对象"，粘贴得到文件（出现在目标文件夹里）
+          上面 → 复制“文字”（路径），粘贴得到文字
+          这个 → 复制“文件对象”，粘贴得到文件（出现在目标文件夹里）
 
         不同平台实现方式完全不同，所以分三个静态方法处理。
         """
@@ -115,53 +208,30 @@ class ClipboardMixin:
 
     @staticmethod
     def _copy_files_windows(files):
-        """Windows 平台：使用 .NET 的 FileDrop 格式复制文件到剪贴板
+        """Windows 平台：用 pywin32 的 win32clipboard 直接写入 CF_HDROP 剪贴板数据
 
-        PowerShell 的 Set-Clipboard -Path 不能复制文件对象，
-        所以这里使用 .NET 的 System.Windows.Forms 来创建 FileDrop 格式的剪贴板数据。
+        原方案通过 PowerShell 调用 .NET 的 System.Windows.Forms.Clipboard.SetFileDropList，
+        但部分安全软件（如 360）会将 PowerShell 进程启动拦截并报“线程注入”。
 
-        注意：必须使用 -STA 参数启动 PowerShell，因为 System.Windows.Forms.Clipboard
-        是 Windows Forms API，必须在单线程公寓（STA）模式下运行。
+        新方案直接在进程内构造 CF_HDROP 数据写入剪贴板，
+        不再依赖外部 PowerShell 进程，从根本上消除安全软件的误报问题。
 
-        安全说明：脚本用 -EncodedCommand（base64）整体传递，路径内嵌在脚本数组里，
-        任何特殊字符都不会被当成命令执行，彻底消除注入风险。
+        如果 pywin32 未安装，自动回退到 PowerShell 方案（保持兼容）。
         """
         if not files:
             return
 
-        # 文件路径写成 PowerShell 单引号字符串数组（单引号用 '' 转义）
-        # 不使用 stdin 传数据：PowerShell 5.1 的 [Console]::In 在 -Command 模式
-        # 绑定的是控制台输入而不是管道，重定向 stdin 会一直等待导致 30 秒超时
-        items = ", ".join("'" + p.replace("'", "''") + "'" for p in files)
-        script = (
-            "Add-Type -AssemblyName System.Windows.Forms;"
-            "$fdo = New-Object System.Collections.Specialized.StringCollection;"
-            f"$paths = @({items});"
-            "foreach ($p in $paths) { if ($p) { [void]$fdo.Add($p) } };"
-            # 剪贴板可能被其他程序短暂占用（如复制大文件时），失败后重试 10 次
-            "if ($fdo.Count -gt 0) {"
-            "  $ok = $false;"
-            "  for ($i = 0; $i -lt 10 -and -not $ok; $i++) {"
-            "    try { [System.Windows.Forms.Clipboard]::SetFileDropList($fdo); $ok = $true }"
-            "    catch { Start-Sleep -Milliseconds 200 }"
-            "  }"
-            "  if (-not $ok) { throw '剪贴板被占用，操作失败' }"
-            "}"
-        )
-        # -EncodedCommand：把 UTF-16LE 编码的脚本转 base64，PowerShell 解码后执行
-        encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+        # 只在导入处捕获 ImportError（pywin32 不可用）：
+        # 原生写入本身的异常绝不能吞掉并静默降级到可能被安全软件拦截的方案
         try:
-            result = subprocess.run(
-                ["powershell", "-STA", "-NoProfile", "-EncodedCommand", encoded],
-                capture_output=True,
-                timeout=30,                     # 和 macOS/Linux 一样加超时，防止卡死
-            )
-        except subprocess.TimeoutExpired:
-            raise RuntimeError("PowerShell 执行超时（30秒）")
-        if result.returncode != 0:
-            raise RuntimeError(
-                "PowerShell执行失败: " + result.stderr.decode("utf-8", "replace")
-            )
+            import win32clipboard  # noqa: F401  仅探测 pywin32 是否可用
+        except ImportError:
+            # ── 回退方案：PowerShell（保留兼容性） ──
+            _copy_files_windows_powershell(files)
+            return
+
+        # ── 优先方案：pywin32 原生 API ──
+        _copy_files_windows_native(files)
 
     # ════════════════════════════════════════════════════════════
     #  平台实现：macOS
