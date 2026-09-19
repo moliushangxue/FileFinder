@@ -128,7 +128,7 @@ class FileManagerApp(PreviewMixin, ClipboardMixin):
             root: tkinter.Tk() 根窗口对象
         """
         self.root = root
-        self.root.title("FileFinder v2.2")
+        self.root.title("FileFinder v2.5")
         # 自适应屏幕：winfo_screenwidth/height 与 geometry 同为逻辑单位，
         # 直接比较即可。预留 100 像素给任务栏和标题栏，防止窗口超出屏幕底部。
         # （CTk 内部会把逻辑单位乘 DPI 缩放系数转成物理像素，不用我们管）

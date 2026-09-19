@@ -7,6 +7,11 @@
 
 ## [未发布]
 
+### 计划添加
+- 添加撤销功能
+
+## [2.5.0] - 2026-09-20
+
 ### ✨ 新功能
 - **操作历史记录（JSONL 日志）**：每次“复制/剪切到目标文件夹”完成后，把每个文件的源路径、最终落点（含自动重命名后的实际名字）和执行结果（成功/重命名/覆盖/跳过/失败）追加写入 `%LOCALAPPDATA%\FileFinder\operation_history.jsonl`（macOS/Linux 对应配置目录），供用户回顾操作、对照日志手动回退
   - 覆盖类操作的原文件已被替换，条目中标注“原内容无法恢复”
@@ -18,9 +23,6 @@
   - 开关与浮窗联动：点浮窗右上角 X 关闭时开关自动复位，不会出现状态不一致
   - 浮窗默认出现在主窗口右缘内侧，位置计算自适应 DPI 缩放；窗口宽高均可自由拖拽调整（最小尺寸 240x100 逻辑像素）
   - 实现：新增 `keyword_float.py`（`KeywordFloatWindow`）；`file_manager.py` 新增 `toggle_keyword_float()` / `_sync_keywords()` 等方法
-
-### 计划添加
-- 添加撤销功能
 
 ### ⚡ 改进
 - **🟢 清理 `file_manager.py` 顶部的重复 import 块**：原文件在两处重复导入 `constants` / `ConflictDialog` / `PreviewMixin` / `ClipboardMixin`（其中 `PackDialog` 只在第二处），合并为顶部单处导入
