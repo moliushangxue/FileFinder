@@ -7,6 +7,12 @@
 
 ## [未发布]
 
+### ✨ 新功能
+- **操作历史记录（JSONL 日志）**：每次“复制/剪切到目标文件夹”完成后，把每个文件的源路径、最终落点（含自动重命名后的实际名字）和执行结果（成功/重命名/覆盖/跳过/失败）追加写入 `%LOCALAPPDATA%\FileFinder\operation_history.jsonl`（macOS/Linux 对应配置目录），供用户回顾操作、对照日志手动回退
+  - 覆盖类操作的原文件已被替换，条目中标注“原内容无法恢复”
+  - 写日志失败不影响文件操作本身（record_operation 内部兜底异常）
+  - 实现：新增 `operation_log.py`；`perform_action` 逐文件收集最终路径与结果后调用 `record_operation()`
+
 ### 计划添加
 - 添加撤销功能
 

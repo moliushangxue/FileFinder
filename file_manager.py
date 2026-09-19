@@ -48,6 +48,7 @@ from constants import (
 from conflict_dialog import ConflictDialog        # 冲突处理对话框
 from preview_mixin import PreviewMixin            # 文件预览功能
 from clipboard_mixin import ClipboardMixin        # 剪贴板功能
+from operation_log import record_operation        # 操作历史记录（JSONL 日志）
 from disclaimer_dialog import DisclaimerDialog    # 启动风险提示弹窗
 
 
@@ -797,6 +798,7 @@ class FileManagerApp(PreviewMixin, ClipboardMixin):
 
         # ── 第二步：处理冲突（如果有） ──
         conflict_map = {}  # src_path → "skip" / "overwrite" / "rename"
+        conflict_type_map = {}  # src_path → 冲突类型（区分“目标已有同名”与“源文件之间同名”）
         if conflicts:
             # 弹出冲突对话框
             dlg = ConflictDialog(self.root, conflicts)
@@ -804,9 +806,10 @@ class FileManagerApp(PreviewMixin, ClipboardMixin):
             if dlg.result is None:            # 用户点了取消
                 self.status_var.set("操作已取消")
                 return
-            # 记录每个源文件的处理决策
-            for fname, src_path, dest_path, _ in conflicts:
+            # 记录每个源文件的处理决策与冲突类型
+            for fname, src_path, dest_path, conflict_type in conflicts:
                 conflict_map[src_path] = dlg.result.get(src_path, "skip")
+                conflict_type_map[src_path] = conflict_type
 
         # ── 第三步：确认操作 ──
         total = len(selected_files)
@@ -836,25 +839,35 @@ class FileManagerApp(PreviewMixin, ClipboardMixin):
 
         # 逐个文件处理
         failed_files = []  # 记录失败的文件名和原因
+        log_items = []     # 操作明细（供操作历史日志）：每个文件的源路径、最终落点与结果
         for fname, src_path, dest_path in ordered:
+            renamed = False      # 目标路径是否被自动重命名（用户选“重命名”或同名保护）
+            overwritten = False  # 是否覆盖了目标位置原有文件（原内容无法恢复）
             # 如果这个文件有冲突决策
             if src_path in conflict_map:
                 decision = conflict_map[src_path]
                 if decision == "skip":
                     skip_count += 1
+                    log_items.append({"src": src_path, "dst": "", "status": "skipped"})
                     continue                              # 跳过，不处理
                 elif decision == "rename":
                     dest_path = self._unique_dest(dest_path, used_dest_paths)  # 重命名
+                    renamed = True
                 elif decision == "overwrite" and dest_path in used_dest_paths:
                     # 关键保护：目标路径已被本批次的前一个文件占用
                     # （说明这是"源文件之间同名"的冲突），
                     # 此时再覆盖会把前一个文件的内容冲掉（move 时等于数据丢失），
                     # 所以强制改为重命名。
                     dest_path = self._unique_dest(dest_path, used_dest_paths)
+                    renamed = True
+                elif decision == "overwrite" and conflict_type_map.get(src_path) == CONFLICT_TARGET_EXISTS:
+                    # 正常覆盖：确实替换了目标位置原有文件，日志中标注不可恢复
+                    overwritten = True
 
             # 无冲突文件也要检查：前面可能已有同名文件占了目标路径
             elif dest_path in used_dest_paths:
                 dest_path = self._unique_dest(dest_path, used_dest_paths)
+                renamed = True
 
             # 执行实际的文件操作
             try:
@@ -864,13 +877,33 @@ class FileManagerApp(PreviewMixin, ClipboardMixin):
                     shutil.move(src_path, dest_path)       # 移动
                 used_dest_paths.add(dest_path)             # 记录已占用的目标路径
                 success_count += 1
+                # 记录到操作明细（含重命名后的实际路径，供用户手动回退）
+                if renamed:
+                    log_items.append({"src": src_path, "dst": dest_path, "status": "renamed"})
+                elif overwritten:
+                    log_items.append({"src": src_path, "dst": dest_path, "status": "overwritten",
+                                      "note": "覆盖了目标位置原有文件，原内容无法恢复"})
+                else:
+                    log_items.append({"src": src_path, "dst": dest_path, "status": "ok"})
             except Exception as e:
                 error_count += 1
                 # 记录失败的文件名和原因
                 failed_files.append((fname, str(e)))
+                # 记录到操作明细（dst 为尝试写入的目标路径，仅供追溯）
+                log_items.append({"src": src_path, "dst": dest_path, "status": "failed",
+                                  "error": str(e)})
                 # 记录详细错误信息到控制台，方便调试
                 error_detail = traceback.format_exc()
                 print(f"处理文件失败 {fname}: {str(e)}\n{error_detail}")
+
+        # ── 记录操作历史（供用户回顾与手动回退；写日志失败不影响主流程） ──
+        record_operation(
+            op=action,
+            action=action_names[action],
+            target=target_folder,
+            items=log_items,
+            stats={"success": success_count, "skipped": skip_count, "failed": error_count},
+        )
 
         # ── 第五步：显示结果 ──
         result_parts = [f"操作完成！\n成功: {success_count} 个文件"]
