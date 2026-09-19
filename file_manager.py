@@ -30,6 +30,8 @@ v2.2 - 界面重做为 customtkinter 浅色现代风
 
 import os
 import shutil                                     # 文件操作（复制、移动）
+import subprocess                                 # 调用系统程序（打开操作记录）
+import sys                                        # 平台判断
 import tkinter as tk
 from tkinter import filedialog, messagebox
 import threading                                  # 多线程，让扫描不卡 UI
@@ -48,8 +50,10 @@ from constants import (
 from conflict_dialog import ConflictDialog        # 冲突处理对话框
 from preview_mixin import PreviewMixin            # 文件预览功能
 from clipboard_mixin import ClipboardMixin        # 剪贴板功能
-from operation_log import record_operation        # 操作历史记录（JSONL 日志）
+from operation_log import record_operation, get_log_path   # 操作历史记录（JSONL 日志）
 from disclaimer_dialog import DisclaimerDialog    # 启动风险提示弹窗
+from pack_dialog import PackDialog                # 打包到 ZIP 对话框
+from keyword_float import KeywordFloatWindow      # 关键词浮窗（常驻置顶）
 
 
 class ToolTip:
@@ -107,16 +111,6 @@ class ToolTip:
             self.tip_window.destroy()  # 销毁窗口
             self.tip_window = None
 
-# 导入项目的其他模块
-from constants import (
-    COMMON_TYPES, compile_regex_patterns, match_file,
-    CONFLICT_TARGET_EXISTS, CONFLICT_SOURCE_DUP,
-)
-from conflict_dialog import ConflictDialog        # 冲突处理对话框
-from preview_mixin import PreviewMixin            # 文件预览功能
-from clipboard_mixin import ClipboardMixin        # 剪贴板功能
-from pack_dialog import PackDialog                # 打包到 ZIP 对话框
-
 
 class FileManagerApp(PreviewMixin, ClipboardMixin):
     """主应用类
@@ -156,6 +150,7 @@ class FileManagerApp(PreviewMixin, ClipboardMixin):
         self._scan_generation = 0                       # 扫描代际标记：防止过期线程覆盖新结果
         self.recursive_var = tk.BooleanVar(value=False) # 是否递归搜索（默认不递归）
         self.regex_var = tk.BooleanVar(value=False)     # 是否使用正则表达式搜索（默认不使用）
+        self._float_window = None                       # 关键词浮窗（未打开时为 None）
 
         # 创建界面上的所有控件
         self.create_widgets()
@@ -263,6 +258,16 @@ class FileManagerApp(PreviewMixin, ClipboardMixin):
             font=(UI.FONT, 12), text_color=UI.TEXT_DIM,
         ).pack(side=tk.LEFT, pady=(6, 0))
 
+        # 操作记录入口（右侧）：一键打开操作历史日志
+        self.history_btn = self._make_button(
+            header, "操作记录", self.open_operation_history,
+            style="outline", width=90, height=28,
+        )
+        self.history_btn.pack(side=tk.RIGHT)
+        ToolTip(self.history_btn, "打开操作历史日志：\n"
+                                  "记录每次“复制/剪切到目标文件夹”的源文件与最终落点，\n"
+                                  "可对照日志手动回退误操作。")
+
         # ── 区域 1：源文件夹卡片 ──
         folder_card = self._card(main)
         folder_card.pack(fill=tk.X, pady=(0, 8))
@@ -308,15 +313,33 @@ class FileManagerApp(PreviewMixin, ClipboardMixin):
         # 关键词输入框（CTkTextbox 是多行文本框）
         kw_box = ctk.CTkFrame(search_row, fg_color="transparent")
         kw_box.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
+
+        # 标签行：提示文字在左，"关键词浮窗"开关在右
+        kw_label_row = ctk.CTkFrame(kw_box, fg_color="transparent")
+        kw_label_row.pack(fill=tk.X, pady=(0, 3))
         ctk.CTkLabel(
-            kw_box, text="关键词（每行一个，留空表示不过滤）",
+            kw_label_row, text="关键词（每行一个，留空表示不过滤）",
             font=(UI.FONT, 11), text_color=UI.TEXT_DIM,
-        ).pack(anchor=tk.W, pady=(0, 3))
+        ).pack(side=tk.LEFT)
+        self.float_switch = ctk.CTkSwitch(
+            kw_label_row, text="关键词浮窗", command=self.toggle_keyword_float,
+            font=(UI.FONT, 11), text_color=UI.TEXT_DIM,
+            progress_color=UI.ACCENT, switch_width=34, switch_height=17,
+        )
+        self.float_switch.pack(side=tk.RIGHT)
+        ToolTip(self.float_switch, "开启后弹出一个小输入窗并常驻在最前，\n"
+                                   "在其他软件里找文件时可以直接输入关键词，\n"
+                                   "内容与这里实时同步。")
+
         self.keyword_text = ctk.CTkTextbox(
             kw_box, height=64, font=(UI.FONT, 12),
             border_width=1, border_color=UI.BORDER,
         )
         self.keyword_text.pack(fill=tk.X)
+
+        # 内容变化时同步到浮窗（浮窗打开时生效）。<<Modified>> 绑在
+        # 底层 tkinter.Text 上：键盘输入/粘贴/程序化清空都会触发
+        self.keyword_text.bind("<<Modified>>", self._on_main_keyword_modified)
 
         # 扫描按钮和清空按钮（放在关键词框右侧）
         btn_col = ctk.CTkFrame(search_row, fg_color="transparent")
@@ -509,6 +532,108 @@ class FileManagerApp(PreviewMixin, ClipboardMixin):
             initial_paths=initial,
             target_folder=tgt,
         )
+
+    # ════════════════════════════════════════════════════════════
+    #  操作记录（打开历史日志）
+    # ════════════════════════════════════════════════════════════
+
+    def open_operation_history(self):
+        """打开操作历史日志文件（JSONL）
+
+        Windows 直接用记事本打开：.jsonl 没有系统文件关联，走默认打开
+        方式会弹“选择打开方式”对话框，直接指定记事本零干扰（日志是
+        纯文本 JSONL，记事本可直接阅读）；macOS/Linux 用系统默认程序。
+        日志还不存在时（从未做过复制/剪切）给出提示。
+        """
+        path = get_log_path()
+        if not os.path.exists(path):
+            messagebox.showinfo(
+                "操作记录",
+                "还没有操作记录。\n\n"
+                "执行过“复制到目标文件夹”或“剪切到目标文件夹”后，这里会生成历史日志。"
+            )
+            return
+        try:
+            if sys.platform == "win32":
+                # stdin/out/err 指向 DEVNULL：打包成无控制台 exe 后，
+                # 避免子进程继承无效句柄导致启动失败
+                subprocess.Popen(
+                    ["notepad.exe", path],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", path])
+            else:
+                subprocess.Popen(["xdg-open", path])
+        except Exception as e:
+            messagebox.showerror("错误", f"无法打开操作记录文件：\n{e}")
+
+    # ════════════════════════════════════════════════════════════
+    #  关键词浮窗（常驻置顶，与主窗口关键词框实时双向同步）
+    # ════════════════════════════════════════════════════════════
+
+    def toggle_keyword_float(self):
+        """"关键词浮窗"开关的回调：开 → 弹出浮窗；关 → 关闭浮窗"""
+        if self.float_switch.get():          # 开关处于"开"状态
+            if self._float_window is None or not self._float_window.winfo_exists():
+                self._float_window = KeywordFloatWindow(
+                    self.root,
+                    on_change=self._sync_from_float,
+                    on_close=self._on_float_closed,
+                )
+                # 打开时初始内容以主窗口为准
+                self._sync_keywords(self.keyword_text,
+                                    self._float_window.keyword_text)
+        else:                                # 开关处于"关"状态
+            self._on_float_closed()
+
+    def _on_float_closed(self):
+        """关闭浮窗：销毁窗口 + 复位开关（点浮窗标题栏 X 时也走这里）"""
+        if self._float_window is not None:
+            self._float_window.destroy()
+            self._float_window = None
+        self.float_switch.deselect()         # 开关拨回"关"，避免状态不一致
+
+    def _on_main_keyword_modified(self, event=None):
+        """主窗口关键词框内容变化 → 同步到浮窗（浮窗未打开时忽略）
+
+        <<Modified>> 每次事件后必须重置标志，否则后续修改只触发一次；
+        重置动作本身会再触发一次空事件，用 edit_modified() 的返回值过滤。
+        """
+        changed = self.keyword_text.edit_modified()
+        self.keyword_text.edit_modified(False)
+        if not changed:
+            return
+        if self._float_window is not None and self._float_window.winfo_exists():
+            self._sync_keywords(self.keyword_text,
+                                self._float_window.keyword_text)
+
+    def _sync_from_float(self):
+        """浮窗内容变化回调 → 同步到主窗口"""
+        win = self._float_window
+        if win is not None and win.winfo_exists():
+            self._sync_keywords(win.keyword_text, self.keyword_text)
+
+    def _sync_keywords(self, source, target):
+        """把 source 文本框的内容镜像到 target 文本框（内容一致则跳过）
+
+        防死循环的关键：比较两边内容，一致就直接返回。程序化的
+        delete/insert 同样会触发 <<Modified>>（延迟派发），如果"改了对方"
+        后对方再同步回来会来回震荡；内容比较法不依赖事件触发时机，
+        两边一致便自然收敛（也避免破坏目标端的光标位置）。
+        """
+        try:
+            src_content = source.get("1.0", "end-1c")
+            if src_content == target.get("1.0", "end-1c"):
+                return
+            target.delete("1.0", tk.END)
+            target.insert("1.0", src_content)
+            target.mark_set("insert", "end-1c")   # 光标移到末尾，方便继续输入
+            target.see("end-1c")
+        except tk.TclError:
+            pass   # 控件在事件间隙被销毁（如用户刚点了浮窗 X），静默跳过
 
     # ════════════════════════════════════════════════════════════
     #  扫描文件（支持递归 + 子线程，不卡 UI）

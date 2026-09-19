@@ -11,12 +11,19 @@
 - **操作历史记录（JSONL 日志）**：每次“复制/剪切到目标文件夹”完成后，把每个文件的源路径、最终落点（含自动重命名后的实际名字）和执行结果（成功/重命名/覆盖/跳过/失败）追加写入 `%LOCALAPPDATA%\FileFinder\operation_history.jsonl`（macOS/Linux 对应配置目录），供用户回顾操作、对照日志手动回退
   - 覆盖类操作的原文件已被替换，条目中标注“原内容无法恢复”
   - 写日志失败不影响文件操作本身（record_operation 内部兜底异常）
+  - 主界面右上角新增“操作记录”按钮：一键用记事本打开历史日志（Windows 直接指定记事本，因 .jsonl 无系统文件关联、走默认打开方式会弹“选择打开方式”对话框；macOS/Linux 用系统默认程序），无需手动寻找配置目录；日志还不存在时给出提示
   - 实现：新增 `operation_log.py`；`perform_action` 逐文件收集最终路径与结果后调用 `record_operation()`
+- **关键词浮窗（常驻置顶）**：主界面“关键词”标签行新增“关键词浮窗”开关，开启后弹出一个带标题栏的小输入窗并常驻在最前，在其他软件里翻找文件时可直接往浮窗里输入关键词（每行一个），不用来回切换主窗口
+  - 浮窗内容与主界面关键词框**实时双向同步**：任一边输入/粘贴/清空，另一边立即跟随（监听底层 tkinter.Text 的 `<<Modified>>` 事件 + 内容比较去重防死循环，键盘输入、Ctrl+V、右键粘贴全覆盖）
+  - 开关与浮窗联动：点浮窗右上角 X 关闭时开关自动复位，不会出现状态不一致
+  - 浮窗默认出现在主窗口右缘内侧，位置计算自适应 DPI 缩放；窗口宽高均可自由拖拽调整（最小尺寸 240x100 逻辑像素）
+  - 实现：新增 `keyword_float.py`（`KeywordFloatWindow`）；`file_manager.py` 新增 `toggle_keyword_float()` / `_sync_keywords()` 等方法
 
 ### 计划添加
 - 添加撤销功能
 
 ### ⚡ 改进
+- **🟢 清理 `file_manager.py` 顶部的重复 import 块**：原文件在两处重复导入 `constants` / `ConflictDialog` / `PreviewMixin` / `ClipboardMixin`（其中 `PackDialog` 只在第二处），合并为顶部单处导入
 - **🟢 Windows 剪贴板复制文件改用原生 API**：原方案通过 PowerShell 调用 .NET 的 `System.Windows.Forms.Clipboard.SetFileDropList`，360 等安全软件会将 PowerShell 进程启动拦截并报“线程注入”。新方案优先用 pywin32 在进程内直接构造 CF_HDROP 格式数据写入剪贴板（`win32clipboard` + `struct.pack`，剪贴板被占用时自动重试 10 次）——pywin32 已安装时不再启动任何外部进程，消除安全软件误报；未安装时回退到 PowerShell 方案（回退方案同时增加 `CREATE_NO_WINDOW` 标志隐藏控制台窗口）
 
 ### 🏗️ 依赖变更
