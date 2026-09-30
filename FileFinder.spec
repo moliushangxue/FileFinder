@@ -1,5 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
+import importlib.util
 import os
+import re
 import sys
 
 from PyInstaller.utils.hooks import collect_all
@@ -38,6 +40,46 @@ if not os.path.exists(_icon):
     _icon = None
 if _version and not os.path.exists(_version):
     _version = None
+
+
+# ─── 构建期版本一致性校验 ───
+# 版本号在项目里存了两份、且这两份没法在运行时互相推导：
+#   - constants.py 的 APP_VERSION  → 运行时窗口标题用（file_manager.py 引用）
+#   - version_info.txt             → 构建期写进 exe 的 PE 资源块，资源管理器「属性→详细信息」读的就是它
+# 一旦两边不一致，就会出现「窗口标题写 3.0.0、文件属性写 2.5.0」这种自相矛盾的产物，
+# 而且平时完全看不出来——只有出问题时才被发现。
+# 所以在这里读一遍两边对齐：不相等就中断打包。宁可打不出包，也不发一个版本号对不上的 exe。
+_spec_dir = globals().get('SPECPATH') or os.getcwd()
+
+
+def _read_code_version():
+    """从 constants.py 里读出 APP_VERSION（不通过 import constants，避免依赖构建机的 sys.path）"""
+    path = os.path.join(_spec_dir, 'constants.py')
+    module_spec = importlib.util.spec_from_file_location('_ff_constants_for_check', path)
+    module = importlib.util.module_from_spec(module_spec)
+    module_spec.loader.exec_module(module)   # exec_module 挂在 spec.loader 上，不是 spec 本身
+    return module.APP_VERSION
+
+
+def _read_pe_version():
+    """从 version_info.txt 里抠出 FileVersion 的字符串形式（如 '3.0.0'）"""
+    path = os.path.join(_spec_dir, 'version_info.txt')
+    with open(path, encoding='utf-8') as f:
+        matched = re.search(r"u'FileVersion',\s*u'([^']+)'", f.read())
+    return matched.group(1) if matched else None
+
+
+if _version:   # 只有 Windows 会走到这里（macOS 传的是 None，不生成 PE 资源）
+    _code_version = _read_code_version()
+    _pe_version = _read_pe_version()
+    if _pe_version != _code_version:
+        raise SystemExit(
+            "\n[版本号不一致，已中断打包]\n"
+            "  constants.py 的 APP_VERSION   = %r\n"
+            "  version_info.txt 的 FileVersion = %r\n"
+            "请把两处改成同一个值后重新打包。\n" % (_code_version, _pe_version)
+        )
+    print("[FileFinder] 版本号校验通过：%s" % _code_version)
 
 
 a = Analysis(

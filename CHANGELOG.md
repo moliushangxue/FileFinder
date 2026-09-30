@@ -7,6 +7,10 @@
 
 ## [未发布]
 
+### 🐛 修复
+- **主窗口标题的版本号不再写死**：标题原为硬编码字符串 `FileFinder v2.5`，v3.0.0 升级时被漏掉，于是标题栏显示的仍是上一个版本。现版本号统一由 `constants.py` 的 `APP_VERSION` 提供，窗口标题引用它，全项目不再出现版本号字面量
+- **新增构建期版本一致性校验**（`FileFinder.spec`）：版本号在项目里存了两份且无法在运行时互相推导——`constants.py` 供窗口标题用，`version_info.txt` 是写进 exe 的 Windows PE 资源块（资源管理器「属性 → 详细信息」读的）。两者不一致会产出「标题栏 3.0.0、文件属性 2.5.0」这种自相矛盾的 exe 且平时看不出来，故在打包时读一遍两边、不等就中断打包
+
 ### 计划添加
 - 添加撤销功能
 
@@ -26,8 +30,9 @@
 ### ⚡ 改进
 
 - **macOS 依赖安装改用虚拟环境，绕开 PEP 668**：原启动脚本用 `pip install --user customtkinter` 装依赖，而 Homebrew 的 Python 遵守 PEP 668，安装会被拦下并报 `externally-managed-environment`（`--user` 也不能绕过），双击启动会卡在依赖安装这一步。现改为在项目目录内创建 `.venv`、把依赖装进虚拟环境、再用 `.venv/bin/python` 启动程序——不写入系统目录、不写入 `/opt/homebrew`、不需要 `sudo`，删掉 `.venv` 即卸载干净（`.venv` 已在 `.gitignore` 中）。同时补充「venv 创建失败」「venv 内 tkinter 不可用」两条报错分支，避免启动后闪退却看不到原因
-- **主窗口标题栏版本号同步到 3.0**：标题在 `file_manager.py` 里是硬编码的字符串（`self.root.title("FileFinder v2.5")`），不属于任何版本常量，容易被漏掉——这次一并更新为 `FileFinder v3.0`
 - **README 的 macOS 安装说明重写**：原说明让人直接 `pip install customtkinter`（正是会被 PEP 668 拦下的做法），现改为虚拟环境流程；修正「系统自带 python3 一定不含 tkinter」的过时表述，并新增 `externally-managed-environment` 的排错 FAQ
+
+> ⚠️ 已知问题：本版的 `FileFinder.exe` 主窗口标题栏仍显示 `FileFinder v2.5`（标题里的版本号是硬编码字符串，发版时漏改）。修复随 **v3.0.1** 发布。
 
 > 说明：`dist/FileFinder.exe` 仍是 Windows 平台产物。PyInstaller 不支持交叉编译，macOS 版需在 Mac 上重新执行打包。
 

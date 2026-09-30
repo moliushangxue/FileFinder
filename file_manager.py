@@ -42,7 +42,7 @@ import customtkinter as ctk                       # 现代化 UI 框架（基于
 
 # 导入项目的其他模块
 from constants import (
-    UI,
+    UI, APP_VERSION,
     COMMON_TYPES, compile_regex_patterns, match_file,
     CONFLICT_TARGET_EXISTS, CONFLICT_SOURCE_DUP,
     should_show_disclaimer, save_disclaimer_agreed,
@@ -128,7 +128,8 @@ class FileManagerApp(PreviewMixin, ClipboardMixin):
             root: tkinter.Tk() 根窗口对象
         """
         self.root = root
-        self.root.title("FileFinder v3.0")
+        # 版本号引用 constants.APP_VERSION（唯一来源），不再写死字面量
+        self.root.title(f"FileFinder v{APP_VERSION}")
         # 自适应屏幕：winfo_screenwidth/height 与 geometry 同为逻辑单位，
         # 直接比较即可。预留 100 像素给任务栏和标题栏，防止窗口超出屏幕底部。
         # （CTk 内部会把逻辑单位乘 DPI 缩放系数转成物理像素，不用我们管）
