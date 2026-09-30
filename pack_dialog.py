@@ -32,7 +32,7 @@ from clipboard_mixin import copy_files_to_clipboard_platform
 # ────────────────────────────────────────────────────────────────
 
 def sanitize_filename(name):
-    """把文件名里的非法字符替换成下划线，避免生成无效路径
+    r"""把文件名里的非法字符替换成下划线，避免生成无效路径
 
     Windows 文件名的非法字符：\ / : * ? " < > |
     """

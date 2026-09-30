@@ -10,6 +10,16 @@
 ### 计划添加
 - 添加撤销功能
 
+### 改进
+- **跨平台完善：macOS 从源码可直接运行**
+  - **字体按平台选择**：原 `UI.FONT` 固定为 `Microsoft YaHei UI` / `Consolas`，在 macOS 上这两个字体族不存在，tkinter 会静默回退到默认字体——程序能开，但界面观感整体跑偏且难以排查。现按平台分支：Windows 用微软雅黑 / Consolas，macOS 用苹方（PingFang SC）/ Menlo，Linux 用 DejaVu Sans / DejaVu Sans Mono
+  - **打包配置 `FileFinder.spec` 按平台选择资源**：图标在 Windows 用 `.ico`、macOS 用 `.icns`；`version_info.txt`（Windows PE 版本资源）在 macOS 上不再传入；对应文件不存在时传 `None` 跳过而非中断打包。新增 macOS 专属 `BUNDLE` 段以产出 `.app`（该段在 Windows 上不执行，不影响现有打包流程）
+  - **新增 macOS 启动脚本 `启动FileFinder.command`**：双击即可运行，自动探测「带 tkinter 的解释器」（系统自带 python3 不含 Tk，直接跑会失败）、缺依赖时自动安装、异常退出时保留窗口以便查看报错
+  - **新增 `.gitattributes`**：强制 `*.command` / `*.sh` 使用 LF 行尾，避免 CRLF 导致 shell 脚本无法执行
+  - **README 平台说明修正**：明确「源码三平台可运行，构建产物仅提供 Windows 版」；补充 macOS 安装 Tk 的注意事项（官方安装包自带，Homebrew 需另装 python-tk）、启动方式，以及 macOS 剪贴板需授权「自动化 → 访达」的说明
+
+  > 说明：`dist/FileFinder.exe` 仍是 Windows 平台产物。PyInstaller 不支持交叉编译，macOS 版需在 Mac 上重新执行打包。
+
 ## [2.5.0] - 2026-09-20
 
 ### ✨ 新功能

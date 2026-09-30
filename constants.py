@@ -36,6 +36,21 @@ CONFLICT_TARGET_EXISTS = "目标文件夹中已存在同名文件"
 CONFLICT_SOURCE_DUP = "选中的源文件之间存在同名"
 
 
+# ─── 全局字体（按平台选择各系统自带的字体） ───
+# 为什么不能写死一个名字：tkinter 在字体族不存在时不会报错，而是「静默回退」到
+# 默认字体——界面能开，但观感整个跑偏，且很难排查。
+# 所以三个平台各用自己系统里一定有的那套：
+#   Windows  微软雅黑 / Consolas
+#   macOS    苹方 PingFang SC / Menlo
+#   Linux    DejaVu Sans / DejaVu Sans Mono（绝大多数发行版自带）
+if sys.platform == "win32":
+    _FONT_UI, _FONT_MONO_FAMILY = "Microsoft YaHei UI", "Consolas"
+elif sys.platform == "darwin":
+    _FONT_UI, _FONT_MONO_FAMILY = "PingFang SC", "Menlo"
+else:
+    _FONT_UI, _FONT_MONO_FAMILY = "DejaVu Sans", "DejaVu Sans Mono"
+
+
 # ─── UI 配色与字体（浅色现代风 + 蓝色点缀） ───
 # 集中定义的好处：想换主题色只改这里，全界面生效
 class UI:
@@ -50,8 +65,8 @@ class UI:
     DANGER = "#dc2626"        # 危险操作：红（覆盖按钮）
     DANGER_HOVER = "#b91c1c"
 
-    FONT = "Microsoft YaHei UI"      # 全局字体：微软雅黑
-    FONT_MONO = "Consolas"           # 等宽字体：预览代码用
+    FONT = _FONT_UI                  # 全局字体：按平台选择（见上方 _FONT_UI 的说明）
+    FONT_MONO = _FONT_MONO_FAMILY    # 等宽字体：预览代码/日志用
 
 
 

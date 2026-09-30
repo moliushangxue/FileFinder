@@ -27,10 +27,13 @@ share/python-wheels/
 MANIFEST
 
 # PyInstaller
-#   Usually these files are written by a python script from a template
-#   before PyInstaller builds the exe, so as to inject date/other infos into it.
+#   *.manifest 是构建时自动生成的中间产物，不用跟踪。
+#   ⚠️ 注意：*.spec 这个 PyInstaller 模板默认规则必须去掉。
+#   本项目的 FileFinder.spec 是**手工维护**的配置文件——里面写死了
+#   pywin32 的收集逻辑、按平台选择图标/版本资源、以及 macOS 的 BUNDLE 段，
+#   不是 `pyinstaller xxx.py` 那种一次性的自动生成产物。
+#   忽略它 → 别人 clone 下来根本没有打包配置，无法复现构建。
 *.manifest
-*.spec
 
 # IDE / 工具杂项
 .workbuddy/

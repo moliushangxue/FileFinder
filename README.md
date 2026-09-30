@@ -8,6 +8,10 @@
 ![Python](https://img.shields.io/badge/python-3.11+-green)
 ![License](https://img.shields.io/badge/license-MIT-yellow)
 
+> **平台说明**：源码在 Windows / macOS / Linux 三个平台均可运行；
+> 官方构建产物（`dist/FileFinder.exe`）目前仅提供 Windows 版。
+> macOS 与 Linux 请按下文「从源码运行」的方式启动。
+
 ## 功能特点
 
 - **文件夹选择**: 轻松选择源文件夹和目标文件夹
@@ -65,12 +69,34 @@
 
 - Python 3.11 或更高版本
 - customtkinter（v2.2 起界面基于 customtkinter 构建）
-- pywin32（Windows 推荐安装：使用原生 API 复制文件到剪贴板，避免 360 等安全软件误报）
+- pywin32（**仅 Windows**，推荐安装：使用原生 API 复制文件到剪贴板，避免 360 等安全软件误报）
+
+#### Windows
 
 ```bash
 py -3.11 -m pip install customtkinter
 # Windows 推荐同时安装 pywin32（原生剪贴板 API，避免安全软件拦截）
 py -3.11 -m pip install pywin32
+```
+
+#### macOS
+
+**务必使用 [python.org 官方安装包](https://www.python.org/downloads/macos/)，不要用系统自带的 `python3`。**
+
+原因：macOS 自带的 `python3` 由 Xcode 命令行工具提供，**它不包含 tkinter**，直接运行会以 `ModuleNotFoundError: No module named 'tkinter'` 失败。Homebrew 安装的 Python 同样默认不带 Tk（需额外 `brew install python-tk`）。官方安装包自带 Tk，无需任何额外配置，对不想折腾的环境最省事。
+
+```bash
+/usr/local/bin/python3 -m pip install customtkinter
+# Apple Silicon（M 系列芯片）路径为 /opt/homebrew/bin/python3
+```
+
+`pywin32` 是 Windows 专属依赖，macOS 上不需要也无法安装；程序中的剪贴板功能会自动切换到 AppleScript 方案。
+
+#### Linux
+
+```bash
+python3 -m pip install customtkinter
+sudo apt-get install xclip    # 复制文件到剪贴板依赖 xclip
 ```
 
 ### 使用方法
@@ -86,14 +112,36 @@ cd FileFinder
 
 #### 2. 启动程序
 
-**方式一：双击批处理文件（Windows）**
+**Windows — 双击批处理文件**
 ```
 双击 "启动文件管理工具.bat"
 ```
 
-**方式二：命令行启动**
+**macOS — 双击启动脚本**
+
+首次使用需要先赋予执行权限（只需一次）：
+
 ```bash
+chmod +x 启动FileFinder.command
+```
+
+之后双击 `启动FileFinder.command` 即可。如果双击无反应，或文件是从 Windows 拷贝过来的，直接在终端运行：
+
+```bash
+bash 启动FileFinder.command
+```
+
+> 若文件经由 U 盘等方式从 Windows 拷贝，可能带上 CRLF 行尾导致脚本无法执行，
+> 可先执行 `sed -i '' $'s/\r$//' 启动FileFinder.command` 修正。
+
+**命令行启动（所有平台）**
+
+```bash
+# Windows
 py -3.11 file_manager.py
+
+# macOS / Linux
+python3 file_manager.py
 ```
 
 #### 3. 使用步骤
@@ -222,6 +270,14 @@ A: 查看操作历史日志（每次"复制/剪切到目标文件夹"都会自�
 
 日志每行一条记录（JSON 格式），用记事本即可阅读，包含操作时间、目标文件夹和每个文件的源路径与最终落点。注意：**覆盖类操作的原文件已被替换，无法回退**；剪切可按日志把文件移回原位置，复制可按日志删除副本。
 
+### Q: macOS 上启动报 `ModuleNotFoundError: No module named 'tkinter'`？
+
+A: 你用的是系统自带的 `python3`（Xcode 命令行工具提供），它不含 tkinter。请安装 [python.org 官方版本](https://www.python.org/downloads/macos/) 后重试，或使用 `启动FileFinder.command`（它会自动跳过不带 Tk 的解释器并给出提示）。
+
+### Q: macOS 上复制文件到剪贴板时，弹出「想控制"访达"」的授权请求？
+
+A: 这是 macOS 的正常安全机制，不是程序故障。macOS 上把文件写入剪贴板需要通过 AppleScript 控制 Finder，首次执行时系统会请求「自动化」权限。点击「允许」即可，之后不再询问。若之前误点了「不允许」，可到「系统设置 → 隐私与安全性 → 自动化」中重新勾选 Finder。
+
 ### Q: 搜索时区分大小写吗？
 A: 不区分，FileFinder 会忽略大小写进行搜索。
 
@@ -244,7 +300,7 @@ A: 这些是二进制格式，无法直接提取文本。建议转换为 .docx/.
 - **pywin32**（Windows 可选，推荐）: 通过 pip 安装（`pip install pywin32`）；安装后复制文件到剪贴板使用原生 API，避免 360 等安全软件误报；未安装时回退到 PowerShell 方案
 - **操作系统**:
   - Windows 7 或更高版本
-  - macOS 10.10 或更高版本
+  - macOS 10.13 或更高版本（需使用带 Tk 的 Python，见上方「安装要求 - macOS」）
   - Linux（需要安装 xclip）
 
 
