@@ -81,14 +81,23 @@ py -3.11 -m pip install pywin32
 
 #### macOS
 
-**务必使用 [python.org 官方安装包](https://www.python.org/downloads/macos/)，不要用系统自带的 `python3`。**
+**推荐方式：直接双击 `启动FileFinder.command`。** 脚本会自动挑一个带 Tk 的 Python、在项目目录里建好独立的虚拟环境 `.venv`、装好依赖，然后启动程序。首次运行略慢（要下载依赖），之后启动很快。
 
-原因：macOS 自带的 `python3` 由 Xcode 命令行工具提供，**它不包含 tkinter**，直接运行会以 `ModuleNotFoundError: No module named 'tkinter'` 失败。Homebrew 安装的 Python 同样默认不带 Tk（需额外 `brew install python-tk`）。官方安装包自带 Tk，无需任何额外配置，对不想折腾的环境最省事。
+想手动来也可以：
 
 ```bash
-/usr/local/bin/python3 -m pip install customtkinter
-# Apple Silicon（M 系列芯片）路径为 /opt/homebrew/bin/python3
+python3 -m venv .venv
+.venv/bin/python -m pip install customtkinter
+.venv/bin/python file_manager.py
 ```
+
+**为什么用虚拟环境，而不是直接 `pip install`**
+
+Homebrew 的 Python 遵守 PEP 668，直接 `pip install` 会被拦下并报 `externally-managed-environment`——目的是不让第三方包装坏 brew 自身的依赖。虚拟环境是官方指定的正规出口：它只是在项目目录里新开一份独立的依赖目录，**不写入系统目录、不写入 `/opt/homebrew`、不需要 `sudo`**，删掉 `.venv` 就等于卸载干净（`.venv` 已在 `.gitignore` 里，不会被提交）。
+
+**关于 tkinter**
+
+不同来源的 macOS Python 差别很大，不能假设 `python3` 一定带 Tk：Xcode 命令行工具提供的 `/usr/bin/python3` 有些版本缺 Tcl/Tk；Homebrew 的 Python 需要额外 `brew install python-tk` 才有。所以启动脚本会逐个探测「能不能 `import tkinter`」，只认能用的那个。不想折腾就装 [python.org 官方安装包](https://www.python.org/downloads/macos/)，它自带 Tk，无需额外配置。
 
 `pywin32` 是 Windows 专属依赖，macOS 上不需要也无法安装；程序中的剪贴板功能会自动切换到 AppleScript 方案。
 
@@ -272,7 +281,18 @@ A: 查看操作历史日志（每次"复制/剪切到目标文件夹"都会自�
 
 ### Q: macOS 上启动报 `ModuleNotFoundError: No module named 'tkinter'`？
 
-A: 你用的是系统自带的 `python3`（Xcode 命令行工具提供），它不含 tkinter。请安装 [python.org 官方版本](https://www.python.org/downloads/macos/) 后重试，或使用 `启动FileFinder.command`（它会自动跳过不带 Tk 的解释器并给出提示）。
+A: 你用的解释器不含 tkinter。装 [python.org 官方版本](https://www.python.org/downloads/macos/) 后重试；或者直接用 `启动FileFinder.command`——它会自动跳过不带 Tk 的解释器并给出提示。
+
+### Q: macOS 上装依赖报 `error: externally-managed-environment`？
+
+A: 这是 Homebrew 的 Python 在执行 PEP 668 保护，不是你的环境坏了。**不要**用 `--break-system-packages` 硬闯（可能弄坏 brew 环境），改用虚拟环境：
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install customtkinter
+```
+
+`启动FileFinder.command` 已经默认这么做，直接双击它即可。
 
 ### Q: macOS 上复制文件到剪贴板时，弹出「想控制"访达"」的授权请求？
 

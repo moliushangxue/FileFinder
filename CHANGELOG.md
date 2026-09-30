@@ -10,15 +10,25 @@
 ### 计划添加
 - 添加撤销功能
 
-### 改进
-- **跨平台完善：macOS 从源码可直接运行**
+## [3.0.0] - 2026-09-30
+
+主版本号从 2.x 提升到 3.0：FileFinder 从一个 Windows 工具，变为**源码可在 Windows / macOS / Linux 三个平台运行**的跨平台项目。
+
+### ✨ 新功能
+
+- **新增 macOS 平台支持：源码可直接在 macOS 上运行**
   - **字体按平台选择**：原 `UI.FONT` 固定为 `Microsoft YaHei UI` / `Consolas`，在 macOS 上这两个字体族不存在，tkinter 会静默回退到默认字体——程序能开，但界面观感整体跑偏且难以排查。现按平台分支：Windows 用微软雅黑 / Consolas，macOS 用苹方（PingFang SC）/ Menlo，Linux 用 DejaVu Sans / DejaVu Sans Mono
   - **打包配置 `FileFinder.spec` 按平台选择资源**：图标在 Windows 用 `.ico`、macOS 用 `.icns`；`version_info.txt`（Windows PE 版本资源）在 macOS 上不再传入；对应文件不存在时传 `None` 跳过而非中断打包。新增 macOS 专属 `BUNDLE` 段以产出 `.app`（该段在 Windows 上不执行，不影响现有打包流程）
-  - **新增 macOS 启动脚本 `启动FileFinder.command`**：双击即可运行，自动探测「带 tkinter 的解释器」（系统自带 python3 不含 Tk，直接跑会失败）、缺依赖时自动安装、异常退出时保留窗口以便查看报错
+  - **新增 macOS 启动脚本 `启动FileFinder.command`**：双击即可运行——自动探测「带 tkinter 的解释器」（不同来源的 python3 是否带 Tk 并不一致，不能假设）、在项目目录里建好独立的虚拟环境、装好依赖后启动；异常退出时保留窗口以便查看报错
   - **新增 `.gitattributes`**：强制 `*.command` / `*.sh` 使用 LF 行尾，避免 CRLF 导致 shell 脚本无法执行
   - **README 平台说明修正**：明确「源码三平台可运行，构建产物仅提供 Windows 版」；补充 macOS 安装 Tk 的注意事项（官方安装包自带，Homebrew 需另装 python-tk）、启动方式，以及 macOS 剪贴板需授权「自动化 → 访达」的说明
 
-  > 说明：`dist/FileFinder.exe` 仍是 Windows 平台产物。PyInstaller 不支持交叉编译，macOS 版需在 Mac 上重新执行打包。
+### ⚡ 改进
+
+- **macOS 依赖安装改用虚拟环境，绕开 PEP 668**：原启动脚本用 `pip install --user customtkinter` 装依赖，而 Homebrew 的 Python 遵守 PEP 668，安装会被拦下并报 `externally-managed-environment`（`--user` 也不能绕过），双击启动会卡在依赖安装这一步。现改为在项目目录内创建 `.venv`、把依赖装进虚拟环境、再用 `.venv/bin/python` 启动程序——不写入系统目录、不写入 `/opt/homebrew`、不需要 `sudo`，删掉 `.venv` 即卸载干净（`.venv` 已在 `.gitignore` 中）。同时补充「venv 创建失败」「venv 内 tkinter 不可用」两条报错分支，避免启动后闪退却看不到原因
+- **README 的 macOS 安装说明重写**：原说明让人直接 `pip install customtkinter`（正是会被 PEP 668 拦下的做法），现改为虚拟环境流程；修正「系统自带 python3 一定不含 tkinter」的过时表述，并新增 `externally-managed-environment` 的排错 FAQ
+
+> 说明：`dist/FileFinder.exe` 仍是 Windows 平台产物。PyInstaller 不支持交叉编译，macOS 版需在 Mac 上重新执行打包。
 
 ## [2.5.0] - 2026-09-20
 
