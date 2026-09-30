@@ -26,6 +26,7 @@
 ### ⚡ 改进
 
 - **macOS 依赖安装改用虚拟环境，绕开 PEP 668**：原启动脚本用 `pip install --user customtkinter` 装依赖，而 Homebrew 的 Python 遵守 PEP 668，安装会被拦下并报 `externally-managed-environment`（`--user` 也不能绕过），双击启动会卡在依赖安装这一步。现改为在项目目录内创建 `.venv`、把依赖装进虚拟环境、再用 `.venv/bin/python` 启动程序——不写入系统目录、不写入 `/opt/homebrew`、不需要 `sudo`，删掉 `.venv` 即卸载干净（`.venv` 已在 `.gitignore` 中）。同时补充「venv 创建失败」「venv 内 tkinter 不可用」两条报错分支，避免启动后闪退却看不到原因
+- **主窗口标题栏版本号同步到 3.0**：标题在 `file_manager.py` 里是硬编码的字符串（`self.root.title("FileFinder v2.5")`），不属于任何版本常量，容易被漏掉——这次一并更新为 `FileFinder v3.0`
 - **README 的 macOS 安装说明重写**：原说明让人直接 `pip install customtkinter`（正是会被 PEP 668 拦下的做法），现改为虚拟环境流程；修正「系统自带 python3 一定不含 tkinter」的过时表述，并新增 `externally-managed-environment` 的排错 FAQ
 
 > 说明：`dist/FileFinder.exe` 仍是 Windows 平台产物。PyInstaller 不支持交叉编译，macOS 版需在 Mac 上重新执行打包。
